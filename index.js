@@ -1,6 +1,7 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, REST, Routes } = require('discord.js');
 const axios = require('axios');
+const translate = require('@vitalets/google-translate-api');
 
 const PREFIX = ']';
 const client = new Client({
@@ -11,7 +12,7 @@ const client = new Client({
   ],
 });
 
-// --- Keep-alive server for Render/Replit ---
+// --- Keep-alive server ---
 const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -30,8 +31,8 @@ async function getRandomTenorGif(searchTerm) {
       return response.data.results[Math.floor(Math.random() * response.data.results.length)].url;
     }
     return null;
-  } catch (error) {
-    console.error('Tenor error:', error.message);
+  } catch (err) {
+    console.error('Tenor error:', err.message);
     return null;
   }
 }
@@ -40,17 +41,34 @@ function randomChoice(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-// --- Bot ready ---
-client.once('ready', () => {
-  console.log(`Bot is ready! Logged in as ${client.user.tag}`);
+// --- Ready event ---
+client.once('ready', async () => {
+  console.log(`Bot ready! Logged in as ${client.user.tag}`);
+
+  // Register slash commands
+  const commands = [
+    { name: 'joke', description: 'Get a random joke' },
+    { name: 'meme', description: 'Get a random meme' },
+    { name: 'cat', description: 'Get a random cat picture' },
+    { name: 'dog', description: 'Get a random dog picture' },
+    { name: 'translate', description: 'Translate text to another language', options: [
+      { name: 'text', type: 3, description: 'Text to translate', required: true },
+      { name: 'lang', type: 3, description: 'Target language code (e.g., en, es, fr)', required: true }
+    ]}
+  ];
+  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+  try {
+    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+    console.log('Slash commands registered!');
+  } catch (err) {
+    console.error(err);
+  }
 });
 
 // --- Message handler ---
 client.on('messageCreate', async (message) => {
-  const content = message.content.toLowerCase();
-
-  // Ignore bot messages
   if (message.author.bot) return;
+  const content = message.content.toLowerCase();
 
   // --- Auto replies ---
   if (content.includes('good morning')) {
@@ -58,7 +76,6 @@ client.on('messageCreate', async (message) => {
     await message.reply(gif || 'Good morning! 🌅');
     return;
   }
-
   if (content.includes('welcome')) {
     const gif = await getRandomTenorGif('welcome');
     await message.reply(gif || 'Welcome! 👋');
@@ -71,80 +88,54 @@ client.on('messageCreate', async (message) => {
   const command = args.shift().toLowerCase();
 
   try {
-    // ----- Fun commands -----
     if (command === 'joke') {
       const res = await axios.get('https://official-joke-api.appspot.com/random_joke');
       await message.reply(`${res.data.setup} ... ${res.data.punchline}`);
-    }
-
-    else if (command === 'meme') {
-      const res = await axios.get('https://some-random-api.ml/meme');
-      await message.reply(res.data?.image || 'Could not fetch meme 😢');
-    }
-
-    else if (command === 'cat') {
+    } else if (command === 'meme') {
+      const res = await axios.get('https://meme-api.com/gimme');
+      await message.reply(res.data.url || 'No meme 😢');
+    } else if (command === 'cat') {
       const res = await axios.get('https://api.thecatapi.com/v1/images/search');
-      await message.reply(res.data[0]?.url || 'No cat today 😿');
-    }
-
-    else if (command === 'dog') {
+      await message.reply(res.data[0]?.url || 'No cat 😿');
+    } else if (command === 'dog') {
       const res = await axios.get('https://dog.ceo/api/breeds/image/random');
-      await message.reply(res.data.message || 'No dog today 🐶');
-    }
-
-    else if (command === '8ball') {
+      await message.reply(res.data.message || 'No dog 🐶');
+    } else if (command === '8ball') {
       const answers = ['Yes', 'No', 'Maybe', 'Definitely', 'Absolutely not', 'Ask later', 'I don’t know'];
       await message.reply(randomChoice(answers));
-    }
-
-    else if (command === 'coinflip') {
+    } else if (command === 'coinflip') {
       await message.reply(Math.random() < 0.5 ? 'Heads 🪙' : 'Tails 🪙');
-    }
-
-    else if (command === 'gif') {
+    } else if (command === 'gif') {
       const keyword = args.join(' ');
-      if (!keyword) return message.reply('Please give me a keyword for the GIF.');
+      if (!keyword) return message.reply('Provide a keyword for the GIF.');
       const gif = await getRandomTenorGif(keyword);
       await message.reply(gif || `No GIF found for "${keyword}" 😢`);
-    }
-
-    else if (command === 'fact') {
+    } else if (command === 'fact') {
       const res = await axios.get('https://uselessfacts.jsph.pl/random.json?language=en');
-      await message.reply(res.data?.text || 'No fact today 😢');
-    }
-
-    else if (command === 'quote') {
+      await message.reply(res.data?.text || 'No fact 😢');
+    } else if (command === 'quote') {
       const res = await axios.get('https://zenquotes.io/api/random');
-      await message.reply(res.data[0]?.q + ' —' + res.data[0]?.a || 'No quote today 😢');
-    }
-
-    // ----- Interactive -----
-    else if (['hug','slap','highfive'].includes(command)) {
+      await message.reply(res.data[0]?.q + ' —' + res.data[0]?.a || 'No quote 😢');
+    } else if (['hug','slap','highfive'].includes(command)) {
       const user = message.mentions.users.first();
-      if (!user) return message.reply('Please mention someone!');
+      if (!user) return message.reply('Mention someone!');
       const actions = { hug: 'hugged', slap: 'slapped', highfive: 'high-fived' };
       const action = actions[command];
       const gif = await getRandomTenorGif(command);
-      await message.reply(`${message.author} ${action} ${user}! ${gif || ''}`);
-    }
-
-    else if (command === 'roll') {
-      await message.reply(`${message.author} rolled a dice: ${Math.floor(Math.random() * 6) + 1}`);
-    }
-
-    else if (command === 'pick') {
+      const embed = new EmbedBuilder()
+        .setDescription(`${message.author} ${action} ${user}!`)
+        .setImage(gif || '')
+        .setColor('Random');
+      await message.reply({ embeds: [embed] });
+    } else if (command === 'roll') {
+      await message.reply(`${message.author} rolled: ${Math.floor(Math.random() * 6) + 1}`);
+    } else if (command === 'pick') {
       const options = args.join(' ').split('|').map(o => o.trim()).filter(Boolean);
-      if (options.length < 2) return message.reply('Give me at least 2 options separated by |');
+      if (options.length < 2) return message.reply('Give at least 2 options separated by |');
       await message.reply(`I choose: ${randomChoice(options)}`);
-    }
-
-    // ----- Utility -----
-    else if (command === 'ping') {
-      const ping = Math.round(client.ws.ping);
-      await message.reply(`Pong! 🏓 Latency: ${ping}ms`);
-    }
-
-    else if (command === 'serverinfo') {
+    } else if (command === 'ping') {
+      await message.reply(`Pong! 🏓 ${Math.round(client.ws.ping)}ms`);
+    } else if (command === 'serverinfo') {
       const embed = new EmbedBuilder()
         .setTitle('Server Info')
         .addFields(
@@ -154,9 +145,7 @@ client.on('messageCreate', async (message) => {
         )
         .setColor('Blue');
       await message.reply({ embeds: [embed] });
-    }
-
-    else if (command === 'userinfo') {
+    } else if (command === 'userinfo') {
       const user = message.mentions.users.first() || message.author;
       const member = message.guild.members.cache.get(user.id);
       const embed = new EmbedBuilder()
@@ -169,66 +158,85 @@ client.on('messageCreate', async (message) => {
         .setColor('Green')
         .setThumbnail(user.displayAvatarURL({ dynamic: true }));
       await message.reply({ embeds: [embed] });
-    }
-
-    else if (command === 'avatar') {
+    } else if (command === 'avatar') {
       const user = message.mentions.users.first() || message.author;
-      await message.reply({ content: `${user.username}'s Avatar:`, files: [user.displayAvatarURL({ dynamic: true })] });
+      const embed = new EmbedBuilder()
+        .setTitle(`${user.username}'s Avatar`)
+        .setImage(user.displayAvatarURL({ dynamic: true }))
+        .setColor('Purple');
+      await message.reply({ embeds: [embed] });
+    } else if (command === 'translate') {
+      const text = args.slice(1).join(' ');
+      const targetLang = args[0];
+      if (!targetLang || !text) return message.reply('Usage: ]translate <lang> <text>');
+      try {
+        const res = await translate(text, { to: targetLang });
+        await message.reply(`**Translated (${res.from.language.iso} → ${targetLang}):** ${res.text}`);
+      } catch {
+        await message.reply('Translation failed 😢');
+      }
+    } else if (command === 'help') {
+      const helpEmbed = new EmbedBuilder()
+        .setTitle('🤖 Fun GIF Bot Commands')
+        .setDescription('All commands listed below:')
+        .addFields(
+          { name: 'Auto replies', value: '"good morning" → GIF\n"welcome" → GIF' },
+          { name: 'Fun', value: `${PREFIX}joke, ${PREFIX}meme, ${PREFIX}cat, ${PREFIX}dog, ${PREFIX}8ball, ${PREFIX}coinflip, ${PREFIX}gif <keyword>, ${PREFIX}fact, ${PREFIX}quote, ${PREFIX}translate <lang> <text>` },
+          { name: 'Interactive', value: `${PREFIX}hug @user, ${PREFIX}slap @user, ${PREFIX}highfive @user, ${PREFIX}roll, ${PREFIX}pick option1 | option2` },
+          { name: 'Utility', value: `${PREFIX}ping, ${PREFIX}serverinfo, ${PREFIX}userinfo @user, ${PREFIX}avatar @user` },
+          { name: 'Help', value: `${PREFIX}help → Show this embed` }
+        )
+        .setColor('Blue')
+        .setFooter({ text: 'Enjoy! 🎉' });
+      await message.reply({ embeds: [helpEmbed] });
+    } else {
+      await message.reply(`Unknown command. Use ${PREFIX}help`);
     }
-
-    // ----- Help -----
-    else if (command === 'help') {
-      const helpMsg = `
-Hi! I am a fun GIF bot 🤖
-
-**Automatic replies (no prefix needed):**
-- "good morning" → Good Morning GIF
-- "welcome" → Welcome GIF
-
-**Commands (use prefix '${PREFIX}'):**
-- ${PREFIX}joke → Random joke
-- ${PREFIX}meme → Random meme
-- ${PREFIX}cat → Random cat picture
-- ${PREFIX}dog → Random dog picture
-- ${PREFIX}8ball → Magic 8-ball answer
-- ${PREFIX}coinflip → Flip a coin
-- ${PREFIX}gif <keyword> → Random GIF
-- ${PREFIX}fact → Random fact
-- ${PREFIX}quote → Random quote
-- ${PREFIX}hug @user → Hug someone
-- ${PREFIX}slap @user → Slap someone
-- ${PREFIX}highfive @user → High-five someone
-- ${PREFIX}roll → Roll a dice
-- ${PREFIX}pick option1 | option2 | ... → Pick one option
-- ${PREFIX}ping → Check bot latency
-- ${PREFIX}serverinfo → Info about the server
-- ${PREFIX}userinfo @user → Info about a user
-- ${PREFIX}avatar @user → Get user avatar
-- ${PREFIX}help → Show this help menu
-      `;
-      await message.reply(helpMsg);
-    }
-
-    else {
-      await message.reply(`Unknown command. Use ${PREFIX}help to see all commands.`);
-    }
-
   } catch (err) {
     console.error('Command error:', err);
     await message.reply('Oops! Something went wrong 😢');
   }
 });
 
-client.on('error', console.error);
+// --- Slash commands ---
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+  try {
+    if (interaction.commandName === 'joke') {
+      const res = await axios.get('https://official-joke-api.appspot.com/random_joke');
+      await interaction.reply(`${res.data.setup} ... ${res.data.punchline}`);
+    } else if (interaction.commandName === 'meme') {
+      const res = await axios.get('https://meme-api.com/gimme');
+      await interaction.reply(res.data.url || 'No meme 😢');
+    } else if (interaction.commandName === 'cat') {
+      const res = await axios.get('https://api.thecatapi.com/v1/images/search');
+      await interaction.reply(res.data[0]?.url || 'No cat 😿');
+    } else if (interaction.commandName === 'dog') {
+      const res = await axios.get('https://dog.ceo/api/breeds/image/random');
+      await interaction.reply(res.data.message || 'No dog 🐶');
+    } else if (interaction.commandName === 'translate') {
+      const text = interaction.options.getString('text');
+      const lang = interaction.options.getString('lang');
+      try {
+        const res = await translate(text, { to: lang });
+        await interaction.reply(`**Translated (${res.from.language.iso} → ${lang}):** ${res.text}`);
+      } catch {
+        await interaction.reply('Translation failed 😢');
+      }
+    }
+  } catch (err) {
+    console.error('Slash command error:', err);
+    await interaction.reply('Oops! Something went wrong 😢');
+  }
+});
 
 // --- Login ---
 const discordToken = process.env.DISCORD_TOKEN;
 if (!discordToken) {
-  console.error('DISCORD_TOKEN is not set in environment variables');
+  console.error('DISCORD_TOKEN not set');
   process.exit(1);
 }
-
-client.login(discordToken).catch((err) => {
-  console.error('Failed to login to Discord:', err.message);
+client.login(discordToken).catch(err => {
+  console.error('Failed to login:', err.message);
   process.exit(1);
 });
