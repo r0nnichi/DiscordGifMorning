@@ -13,6 +13,7 @@ Preferred communication style: Simple, everyday language.
 ### Bot Architecture
 - **Discord.js Client**: Uses Discord.js v14 with Gateway Intents for guild messages and message content access
 - **Event-Driven Design**: Listens for message events and responds to pattern matches (case-insensitive "good morning" or "welcome")
+- **Carl-bot Integration**: Responds to Carl-bot when it mentions @welcomer with "welcome the user" pattern, allowing automated welcome workflows
 - **Priority-Based Routing**: Uses else-if logic to ensure only one response per message; "good morning" takes priority over "welcome"
 - **Async Message Processing**: Handles API calls and responses asynchronously to avoid blocking
 

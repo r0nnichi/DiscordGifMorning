@@ -6,6 +6,7 @@ A Discord bot that replies to greeting messages with random GIFs from Tenor.
 
 - Responds to messages containing "Good morning" with morning GIFs (case-insensitive)
 - Responds to messages containing "Welcome" with welcome GIFs (case-insensitive)
+- Responds when Carl-bot mentions @welcomer with "welcome the user" message
 - Fetches random GIFs from Tenor API
 - Express server to keep the bot alive
 - Fallback to emoji response if GIF fetch fails
@@ -49,5 +50,10 @@ The bot listens for messages and responds based on keywords:
 **"Welcome"**:
 - A random welcome GIF from Tenor (if API is available)
 - A friendly wave emoji 👋 (if GIF fetch fails)
+
+**Carl-bot Integration**:
+- When Carl-bot posts "@welcomer welcome the user!" the bot responds with a welcome GIF
+- This allows Carl-bot to trigger automated welcome messages with GIFs
+- Works with any message from Carl-bot that mentions @welcomer and contains "welcome the user"
 
 The Express server runs on port 3000 to keep the bot alive and provides a health check endpoint.

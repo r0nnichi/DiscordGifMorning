@@ -57,9 +57,33 @@ client.once('ready', () => {
 });
 
 client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-
   const content = message.content.toLowerCase();
+  const authorUsername = message.author.username.toLowerCase();
+  
+  // Check if carlbot is mentioning @welcomer to welcome the user
+  const isCarlbotWelcome = message.author.bot && 
+                          (authorUsername.includes('carl') || authorUsername.includes('carlbot')) &&
+                          (content.includes('@welcomer') || message.mentions.has(client.user)) &&
+                          content.includes('welcome the user');
+  
+  if (isCarlbotWelcome) {
+    try {
+      const gifUrl = await getRandomTenorGif('welcome');
+      
+      if (gifUrl) {
+        await message.reply(gifUrl);
+      } else {
+        await message.reply('Welcome! 👋');
+      }
+    } catch (error) {
+      console.error('Error sending message:', error);
+      await message.reply('Welcome! 👋');
+    }
+    return;
+  }
+  
+  // Ignore other bot messages
+  if (message.author.bot) return;
   
   if (content.includes('good morning')) {
     try {
