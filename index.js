@@ -1,36 +1,35 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Partials, REST, Routes, EmbedBuilder, PermissionsBitField } = require('discord.js');
 const translate = require('@vitalets/google-translate-api');
+const axios = require('axios');
 const express = require('express');
 
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.GuildEmojisAndStickers,
-        GatewayIntentBits.MessageContent
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildEmojisAndStickers
     ],
     partials: [Partials.Channel]
 });
 
-// Keep-alive server
 const app = express();
 const PORT = process.env.PORT || 3000;
+
 app.get('/', (req, res) => res.send('Bot is alive!'));
 app.listen(PORT, () => console.log(`Keep-alive server running on port ${PORT}`));
 
-// PREFIX
-const prefix = ']';
+const PREFIX = ']';
 
-// Ready event
 client.once('ready', () => {
     console.log(`Bot ready! Logged in as ${client.user.tag}`);
     registerSlashCommands();
 });
 
-// -------------------
+// ---------------------
 // SLASH COMMANDS
-// -------------------
+// ---------------------
 async function registerSlashCommands() {
     const commands = [
         {
@@ -77,14 +76,158 @@ async function registerSlashCommands() {
     }
 }
 
-// -------------------
-// INTERACTIONS (Slash Commands)
-// -------------------
+// ---------------------
+// PREFIX COMMANDS
+// ---------------------
+client.on('messageCreate', async message => {
+    if (message.author.bot) return;
+    if (!message.content.startsWith(PREFIX)) return;
+
+    const args = message.content.slice(PREFIX.length).trim().split(/ +/);
+    const cmd = args.shift().toLowerCase();
+
+    try {
+        switch (cmd) {
+            // Fun commands
+            case 'joke':
+                const jokeRes = await axios.get('https://official-joke-api.appspot.com/jokes/random');
+                message.channel.send(`${jokeRes.data.setup}\n${jokeRes.data.punchline}`);
+                break;
+
+            case 'meme':
+                const memeRes = await axios.get('https://meme-api.com/gimme');
+                message.channel.send(memeRes.data.url);
+                break;
+
+            case 'cat':
+                const catRes = await axios.get('https://api.thecatapi.com/v1/images/search');
+                message.channel.send(catRes.data[0].url);
+                break;
+
+            case 'dog':
+                const dogRes = await axios.get('https://dog.ceo/api/breeds/image/random');
+                message.channel.send(dogRes.data.message);
+                break;
+
+            case '8ball':
+                const responses = ['Yes', 'No', 'Maybe', 'Absolutely', 'Definitely not', 'Ask again later'];
+                message.channel.send(responses[Math.floor(Math.random() * responses.length)]);
+                break;
+
+            case 'coinflip':
+                message.channel.send(Math.random() < 0.5 ? 'Heads' : 'Tails');
+                break;
+
+            case 'roll':
+                message.channel.send(`🎲 You rolled: ${Math.floor(Math.random() * 100) + 1}`);
+                break;
+
+            case 'pick':
+                const pickOptions = args.join(' ').split('|').map(o => o.trim());
+                if (pickOptions.length < 2) return message.channel.send('Please provide options separated by |');
+                message.channel.send(`I pick: **${pickOptions[Math.floor(Math.random() * pickOptions.length)]}**`);
+                break;
+
+            case 'ping':
+                message.channel.send(`Pong! 🏓 Latency: ${client.ws.ping}ms`);
+                break;
+
+            case 'avatar':
+                const user = message.mentions.users.first() || message.author;
+                message.channel.send(user.displayAvatarURL({ dynamic: true, size: 1024 }));
+                break;
+
+            case 'userinfo':
+                const u = message.mentions.users.first() || message.author;
+                message.channel.send(`Username: ${u.tag}\nID: ${u.id}\nCreated: ${u.createdAt}`);
+                break;
+
+            case 'serverinfo':
+                const s = message.guild;
+                message.channel.send(`Server: ${s.name}\nID: ${s.id}\nMembers: ${s.memberCount}`);
+                break;
+
+            case 'gif':
+                if (!args.length) return message.channel.send('Provide a keyword for the GIF.');
+                const gifRes = await axios.get(`https://g.tenor.com/v1/search?q=${encodeURIComponent(args.join(' '))}&key=${process.env.TENOR_API_KEY}&limit=1`);
+                if (!gifRes.data.results[0]) return message.channel.send('No GIF found 😢');
+                message.channel.send(gifRes.data.results[0].url);
+                break;
+
+            case 'fact':
+                const factRes = await axios.get('https://uselessfacts.jsph.pl/random.json?language=en');
+                message.channel.send(factRes.data.text);
+                break;
+
+            case 'quote':
+                const quoteRes = await axios.get('https://api.quotable.io/random');
+                message.channel.send(`${quoteRes.data.content} — *${quoteRes.data.author}*`);
+                break;
+
+            case 'translate':
+                if (args.length < 2) return message.channel.send('Usage: ]translate <lang> <text>');
+                const lang = args.shift();
+                const text = args.join(' ');
+                const tRes = await translate(text, { to: lang }).catch(() => null);
+                if (!tRes) return message.channel.send('Translation failed 😢');
+                message.channel.send(`**Translated (${lang}):** ${tRes.text}`);
+                break;
+
+            case 'help':
+                const helpEmbed = new EmbedBuilder()
+                    .setTitle('🤖 Fun GIF Bot Commands')
+                    .setColor('Random')
+                    .setDescription(`
+**Auto replies**
+"good morning" → GIF
+"welcome" → GIF
+
+**Fun**
+]joke, ]meme, ]cat, ]dog, ]8ball, ]coinflip, ]gif <keyword>, ]fact, ]quote, ]translate <lang> <text>
+
+**Interactive**
+]hug @user, ]slap @user, ]highfive @user, ]roll, ]pick option1 | option2
+
+**Utility**
+]ping, ]serverinfo, ]userinfo @user, ]avatar @user
+
+**Help**
+]help → Show this embed
+
+Enjoy! 🎉
+                `);
+                message.channel.send({ embeds: [helpEmbed] });
+                break;
+
+            default:
+                // Auto replies
+                const msg = message.content.toLowerCase();
+                if (msg.includes('good morning')) {
+                    const morningGif = await axios.get(`https://g.tenor.com/v1/search?q=good+morning&key=${process.env.TENOR_API_KEY}&limit=1`);
+                    message.channel.send(morningGif.data.results[0].url);
+                }
+                if (msg.includes('welcome')) {
+                    const welcomeGif = await axios.get(`https://g.tenor.com/v1/search?q=welcome&key=${process.env.TENOR_API_KEY}&limit=1`);
+                    message.channel.send(welcomeGif.data.results[0].url);
+                }
+                break;
+        }
+    } catch (err) {
+        console.error('Prefix command error:', err);
+        message.channel.send('Something went wrong 😢');
+    }
+});
+
+// ---------------------
+// SLASH COMMAND HANDLER
+// ---------------------
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
     try {
-        if (interaction.commandName === 'translate') {
+        const { commandName } = interaction;
+
+        if (commandName === 'translate') {
             const lang = interaction.options.getString('lang');
             const text = interaction.options.getString('text');
             const result = await translate(text, { to: lang }).catch(() => null);
@@ -92,7 +235,7 @@ client.on('interactionCreate', async interaction => {
             interaction.reply(`**Translated (${lang}):** ${result.text}`);
         }
 
-        if (interaction.commandName === 'hug') {
+        if (commandName === 'hug') {
             const user = interaction.options.getUser('user');
             const embed = new EmbedBuilder()
                 .setTitle(`${interaction.user.username} hugs ${user.username}! 🤗`)
@@ -100,7 +243,7 @@ client.on('interactionCreate', async interaction => {
             interaction.reply({ embeds: [embed] });
         }
 
-        if (interaction.commandName === 'slap') {
+        if (commandName === 'slap') {
             const user = interaction.options.getUser('user');
             const embed = new EmbedBuilder()
                 .setTitle(`${interaction.user.username} slaps ${user.username}! 👋`)
@@ -108,7 +251,7 @@ client.on('interactionCreate', async interaction => {
             interaction.reply({ embeds: [embed] });
         }
 
-        if (interaction.commandName === 'stealemoji') {
+        if (commandName === 'stealemoji') {
             if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageEmojisAndStickers)) {
                 return interaction.reply('You need Manage Emojis & Stickers permission to use this.');
             }
@@ -123,7 +266,7 @@ client.on('interactionCreate', async interaction => {
             }
         }
 
-        if (interaction.commandName === 'stealsticker') {
+        if (commandName === 'stealsticker') {
             if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageEmojisAndStickers)) {
                 return interaction.reply('You need Manage Emojis & Stickers permission to use this.');
             }
@@ -144,48 +287,6 @@ client.on('interactionCreate', async interaction => {
     } catch (err) {
         console.error('Interaction error:', err);
         interaction.reply('Something went wrong 😢');
-    }
-});
-
-// -------------------
-// PREFIX COMMANDS
-// -------------------
-client.on('messageCreate', async message => {
-    if (message.author.bot) return;
-    if (!message.content.startsWith(prefix)) return;
-
-    const args = message.content.slice(prefix.length).trim().split(/ +/);
-    const command = args.shift().toLowerCase();
-
-    try {
-        if (command === 'translate') {
-            const lang = args[0];
-            const text = args.slice(1).join(' ');
-            const result = await translate(text, { to: lang }).catch(() => null);
-            if (!result) return message.reply('Translation failed 😢');
-            message.reply(`**Translated (${lang}):** ${result.text}`);
-        }
-
-        if (command === 'hug') {
-            const user = message.mentions.users.first();
-            if (!user) return message.reply('Please mention someone to hug!');
-            const embed = new EmbedBuilder()
-                .setTitle(`${message.author.username} hugs ${user.username}! 🤗`)
-                .setColor('Random');
-            message.channel.send({ embeds: [embed] });
-        }
-
-        if (command === 'slap') {
-            const user = message.mentions.users.first();
-            if (!user) return message.reply('Please mention someone to slap!');
-            const embed = new EmbedBuilder()
-                .setTitle(`${message.author.username} slaps ${user.username}! 👋`)
-                .setColor('Random');
-            message.channel.send({ embeds: [embed] });
-        }
-    } catch (err) {
-        console.error('Prefix command error:', err);
-        message.channel.send('Something went wrong 😢');
     }
 });
 
