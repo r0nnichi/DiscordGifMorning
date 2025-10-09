@@ -56,7 +56,8 @@ async function registerSlashCommands() {
         { name: 'userinfo', description: 'Get user info', options: [{ name: 'user', type: 6, description: 'User', required: false }] },
         { name: 'avatar', description: 'Get user avatar', options: [{ name: 'user', type: 6, description: 'User', required: false }] },
         { name: 'stealemoji', description: 'Steal emoji from another server', options: [{ name: 'emoji', type: 3, description: 'Emoji ID or URL', required: true }] },
-        { name: 'stealsticker', description: 'Steal sticker from another server', options: [{ name: 'sticker', type: 3, description: 'Sticker ID or URL', required: true }] }
+        { name: 'stealsticker', description: 'Steal sticker from another server', options: [{ name: 'sticker', type: 3, description: 'Sticker ID or URL', required: true }] },
+        { name: 'help', description: 'Show all commands and usage' }
     ];
 
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
@@ -96,12 +97,26 @@ client.on('messageCreate', async message => {
     }
 
     if (!message.content.startsWith(PREFIX)) return;
-
     const args = message.content.slice(PREFIX.length).trim().split(/ +/);
     const command = args.shift().toLowerCase();
 
     try {
         switch (command) {
+            case 'help': {
+                const embed = new EmbedBuilder()
+                    .setTitle('🤖 Fun GIF Bot Commands')
+                    .setDescription(
+                        `**Auto replies:**\n"good morning" → GIF\n"welcome" → GIF\n\n` +
+                        `**Fun:**\n]joke, ]meme, ]cat, ]dog, ]8ball, ]coinflip, ]gif <keyword>, ]fact, ]quote\n\n` +
+                        `**Interactive:**\n]hug @user, ]slap @user, ]highfive @user, ]touch @user, ]roll, ]pick option1 | option2\n\n` +
+                        `**Utility:**\n]ping, ]serverinfo, ]userinfo @user, ]avatar @user\n\n` +
+                        `**Steal:**\n]stealemoji <emoji_id>\n]stealsticker <sticker_id>\n\nEnjoy! 🎉`
+                    )
+                    .setColor('Random');
+                message.channel.send({ embeds: [embed] });
+                break;
+            }
+
             case 'ping':
                 message.channel.send(`🏓 Pong! Latency: ${Date.now() - message.createdTimestamp}ms`);
                 break;
@@ -157,9 +172,13 @@ client.on('messageCreate', async message => {
             }
 
             case 'quote': {
-                const response = await fetch('https://api.quotable.io/random');
-                const data = await response.json();
-                message.channel.send(`"${data.content}" — ${data.author}`);
+                try {
+                    const response = await fetch('https://api.quotable.io/random');
+                    const data = await response.json();
+                    message.channel.send(`"${data.content}" — ${data.author}`);
+                } catch {
+                    message.channel.send('Something went wrong fetching a quote 😢');
+                }
                 break;
             }
 
