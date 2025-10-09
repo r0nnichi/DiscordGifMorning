@@ -1,10 +1,11 @@
-# Discord Good Morning Bot
+# Discord Greeting Bot
 
-A Discord bot that replies to "Good morning" messages with random GIFs from Tenor.
+A Discord bot that replies to greeting messages with random GIFs from Tenor.
 
 ## Features
 
-- Responds to messages containing "Good morning" (case-insensitive)
+- Responds to messages containing "Good morning" with morning GIFs (case-insensitive)
+- Responds to messages containing "Welcome" with welcome GIFs (case-insensitive)
 - Fetches random GIFs from Tenor API
 - Express server to keep the bot alive
 - Fallback to emoji response if GIF fetch fails
@@ -39,8 +40,14 @@ node index.js
 
 ## How It Works
 
-The bot listens for messages containing "good morning" and responds with:
-- A random GIF from Tenor (if API is available)
-- A friendly emoji message (if GIF fetch fails)
+The bot listens for messages and responds based on keywords:
+
+**"Good morning"**: 
+- A random morning GIF from Tenor (if API is available)
+- A friendly sunrise emoji 🌅 (if GIF fetch fails)
+
+**"Welcome"**:
+- A random welcome GIF from Tenor (if API is available)
+- A friendly wave emoji 👋 (if GIF fetch fails)
 
 The Express server runs on port 3000 to keep the bot alive and provides a health check endpoint.

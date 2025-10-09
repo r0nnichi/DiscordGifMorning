@@ -22,7 +22,7 @@ app.listen(PORT, () => {
   console.log(`Keep-alive server running on port ${PORT}`);
 });
 
-async function getRandomTenorGif() {
+async function getRandomTenorGif(searchTerm) {
   try {
     const apiKey = process.env.TENOR_API_KEY;
     if (!apiKey) {
@@ -30,7 +30,6 @@ async function getRandomTenorGif() {
       return null;
     }
 
-    const searchTerm = 'good morning';
     const response = await axios.get('https://tenor.googleapis.com/v2/search', {
       params: {
         q: searchTerm,
@@ -64,7 +63,7 @@ client.on('messageCreate', async (message) => {
   
   if (content.includes('good morning')) {
     try {
-      const gifUrl = await getRandomTenorGif();
+      const gifUrl = await getRandomTenorGif('good morning');
       
       if (gifUrl) {
         await message.reply(gifUrl);
@@ -74,6 +73,19 @@ client.on('messageCreate', async (message) => {
     } catch (error) {
       console.error('Error sending message:', error);
       await message.reply('Good morning! 🌅');
+    }
+  } else if (content.includes('welcome')) {
+    try {
+      const gifUrl = await getRandomTenorGif('welcome');
+      
+      if (gifUrl) {
+        await message.reply(gifUrl);
+      } else {
+        await message.reply('Welcome! 👋');
+      }
+    } catch (error) {
+      console.error('Error sending message:', error);
+      await message.reply('Welcome! 👋');
     }
   }
 });

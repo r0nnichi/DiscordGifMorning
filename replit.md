@@ -1,8 +1,8 @@
-# Discord Good Morning Bot
+# Discord Greeting Bot
 
 ## Overview
 
-A Discord bot that automatically responds to "Good morning" messages with random GIFs from Tenor's API. The bot provides a simple, friendly interaction by detecting morning greetings and replying with animated content. An Express server keeps the bot alive and provides health check functionality.
+A Discord bot that automatically responds to greeting messages ("Good morning" and "Welcome") with random GIFs from Tenor's API. The bot provides simple, friendly interactions by detecting greetings and replying with animated content. An Express server keeps the bot alive and provides health check functionality.
 
 ## User Preferences
 
@@ -12,12 +12,13 @@ Preferred communication style: Simple, everyday language.
 
 ### Bot Architecture
 - **Discord.js Client**: Uses Discord.js v14 with Gateway Intents for guild messages and message content access
-- **Event-Driven Design**: Listens for message events and responds to pattern matches (case-insensitive "good morning")
+- **Event-Driven Design**: Listens for message events and responds to pattern matches (case-insensitive "good morning" or "welcome")
+- **Priority-Based Routing**: Uses else-if logic to ensure only one response per message; "good morning" takes priority over "welcome"
 - **Async Message Processing**: Handles API calls and responses asynchronously to avoid blocking
 
 ### API Integration Strategy
-- **Tenor GIF API**: Fetches random GIFs using search-based queries with randomization
-- **Graceful Degradation**: Falls back to emoji responses when GIF fetch fails
+- **Tenor GIF API**: Fetches random GIFs using search-based queries with randomization; supports multiple search terms (e.g., "good morning", "welcome")
+- **Graceful Degradation**: Falls back to context-appropriate emoji responses when GIF fetch fails (🌅 for morning, 👋 for welcome)
 - **Error Handling**: Catches and logs API failures without crashing the bot
 
 ### Keep-Alive Server
