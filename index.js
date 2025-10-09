@@ -1,8 +1,15 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Partials, REST, Routes, EmbedBuilder, PermissionsBitField } = require('discord.js');
+const { 
+    Client, 
+    GatewayIntentBits, 
+    Partials, 
+    REST, 
+    Routes, 
+    EmbedBuilder, 
+    PermissionsBitField 
+} = require('discord.js');
 const translate = require('@vitalets/google-translate-api');
 const express = require('express');
-const TENOR_API_KEY = process.env.TENOR_API_KEY;
 
 const client = new Client({
     intents: [
@@ -20,12 +27,20 @@ const PORT = process.env.PORT || 3000;
 app.get('/', (req, res) => res.send('Bot is alive!'));
 app.listen(PORT, () => console.log(`Keep-alive server running on port ${PORT}`));
 
-client.once('ready', () => {
+client.once('ready', async () => {
     console.log(`Bot ready! Logged in as ${client.user.tag}`);
-    registerSlashCommands();
+
+    // Set presence to online
+    client.user.setPresence({ 
+        activities: [{ name: 'with commands!' }], 
+        status: 'online' 
+    });
+
+    // Register commands
+    await registerSlashCommands();
 });
 
-// Slash commands
+// Slash commands registration
 async function registerSlashCommands() {
     const commands = [
         {
@@ -72,8 +87,11 @@ async function registerSlashCommands() {
     }
 }
 
+// Interaction handler
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
+
+    console.log(`Interaction received: ${interaction.commandName}`);
 
     try {
         if (interaction.commandName === 'translate') {
