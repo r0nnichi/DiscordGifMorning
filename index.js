@@ -1,13 +1,5 @@
 require('dotenv').config();
-const { 
-    Client, 
-    GatewayIntentBits, 
-    Partials, 
-    REST, 
-    Routes, 
-    EmbedBuilder, 
-    PermissionsBitField 
-} = require('discord.js');
+const { Client, GatewayIntentBits, Partials, REST, Routes, EmbedBuilder, PermissionsBitField } = require('discord.js');
 const translate = require('@vitalets/google-translate-api');
 const express = require('express');
 
@@ -21,26 +13,24 @@ const client = new Client({
     partials: [Partials.Channel]
 });
 
+// Keep-alive server
 const app = express();
 const PORT = process.env.PORT || 3000;
-
 app.get('/', (req, res) => res.send('Bot is alive!'));
 app.listen(PORT, () => console.log(`Keep-alive server running on port ${PORT}`));
 
-client.once('ready', async () => {
+// PREFIX
+const prefix = ']';
+
+// Ready event
+client.once('ready', () => {
     console.log(`Bot ready! Logged in as ${client.user.tag}`);
-
-    // Set presence to online
-    client.user.setPresence({ 
-        activities: [{ name: 'with commands!' }], 
-        status: 'online' 
-    });
-
-    // Register commands
-    await registerSlashCommands();
+    registerSlashCommands();
 });
 
-// Slash commands registration
+// -------------------
+// SLASH COMMANDS
+// -------------------
 async function registerSlashCommands() {
     const commands = [
         {
@@ -87,11 +77,11 @@ async function registerSlashCommands() {
     }
 }
 
-// Interaction handler
+// -------------------
+// INTERACTIONS (Slash Commands)
+// -------------------
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
-
-    console.log(`Interaction received: ${interaction.commandName}`);
 
     try {
         if (interaction.commandName === 'translate') {
@@ -154,6 +144,48 @@ client.on('interactionCreate', async interaction => {
     } catch (err) {
         console.error('Interaction error:', err);
         interaction.reply('Something went wrong 😢');
+    }
+});
+
+// -------------------
+// PREFIX COMMANDS
+// -------------------
+client.on('messageCreate', async message => {
+    if (message.author.bot) return;
+    if (!message.content.startsWith(prefix)) return;
+
+    const args = message.content.slice(prefix.length).trim().split(/ +/);
+    const command = args.shift().toLowerCase();
+
+    try {
+        if (command === 'translate') {
+            const lang = args[0];
+            const text = args.slice(1).join(' ');
+            const result = await translate(text, { to: lang }).catch(() => null);
+            if (!result) return message.reply('Translation failed 😢');
+            message.reply(`**Translated (${lang}):** ${result.text}`);
+        }
+
+        if (command === 'hug') {
+            const user = message.mentions.users.first();
+            if (!user) return message.reply('Please mention someone to hug!');
+            const embed = new EmbedBuilder()
+                .setTitle(`${message.author.username} hugs ${user.username}! 🤗`)
+                .setColor('Random');
+            message.channel.send({ embeds: [embed] });
+        }
+
+        if (command === 'slap') {
+            const user = message.mentions.users.first();
+            if (!user) return message.reply('Please mention someone to slap!');
+            const embed = new EmbedBuilder()
+                .setTitle(`${message.author.username} slaps ${user.username}! 👋`)
+                .setColor('Random');
+            message.channel.send({ embeds: [embed] });
+        }
+    } catch (err) {
+        console.error('Prefix command error:', err);
+        message.channel.send('Something went wrong 😢');
     }
 });
 
