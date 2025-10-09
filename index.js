@@ -1,7 +1,6 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Partials, REST, Routes, EmbedBuilder, PermissionsBitField } = require('discord.js');
-const translate = require('@vitalets/google-translate-api');
-const axios = require('axios');
+const fetch = require('node-fetch');
 const express = require('express');
 
 const client = new Client({
@@ -14,136 +13,133 @@ const client = new Client({
     partials: [Partials.Channel]
 });
 
-const TENOR_API_KEY = process.env.TENOR_API_KEY;
-const PREFIX = ']';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => res.send('Bot is alive!'));
 app.listen(PORT, () => console.log(`Keep-alive server running on port ${PORT}`));
 
-client.once('ready', () => {
-    console.log(`Bot ready! Logged in as ${client.user.tag}`);
-    registerSlashCommands();
-});
+const TENOR_API_KEY = process.env.TENOR_API_KEY;
 
-// ------------------- Slash Commands -------------------
+// ======================
+// Helper: fetch Tenor GIF
+// ======================
+async function fetchTenorGif(keyword) {
+    try {
+        const url = `https://g.tenor.com/v1/search?q=${encodeURIComponent(keyword)}&key=${TENOR_API_KEY}&limit=1`;
+        const res = await fetch(url);
+        const data = await res.json();
+        return data.results[0]?.media[0]?.gif?.url || null;
+    } catch (err) {
+        console.error('Tenor fetch error:', err);
+        return null;
+    }
+}
+
+// ======================
+// Slash commands
+// ======================
 async function registerSlashCommands() {
     const commands = [
-        {
-            name: 'translate',
-            description: 'Translate text to another language',
-            options: [
-                { name: 'lang', type: 3, description: 'Language code', required: true },
-                { name: 'text', type: 3, description: 'Text to translate', required: true }
-            ]
-        },
-        {
-            name: 'hug',
-            description: 'Send a hug GIF',
-            options: [{ name: 'user', type: 6, description: 'User to hug', required: true }]
-        },
-        {
-            name: 'slap',
-            description: 'Slap a user with a GIF',
-            options: [{ name: 'user', type: 6, description: 'User to slap', required: true }]
-        },
-        {
-            name: 'highfive',
-            description: 'Highfive a user',
-            options: [{ name: 'user', type: 6, description: 'User to highfive', required: true }]
-        },
-        {
-            name: 'stealemoji',
-            description: 'Steal emoji from another server',
-            options: [{ name: 'emoji', type: 3, description: 'Emoji ID', required: true }]
-        },
-        {
-            name: 'stealsticker',
-            description: 'Steal sticker from another server',
-            options: [{ name: 'sticker', type: 3, description: 'Sticker ID', required: true }]
-        }
+        { name: 'joke', description: 'Get a random joke' },
+        { name: 'meme', description: 'Get a random meme' },
+        { name: 'cat', description: 'Get a random cat' },
+        { name: 'dog', description: 'Get a random dog' },
+        { name: '8ball', description: 'Ask the magic 8ball a question', options: [{ name: 'question', type: 3, description: 'Your question', required: true }] },
+        { name: 'coinflip', description: 'Flip a coin' },
+        { name: 'gif', description: 'Search a GIF on Tenor', options: [{ name: 'keyword', type: 3, description: 'Keyword to search', required: true }] },
+        { name: 'fact', description: 'Get a random fact' },
+        { name: 'quote', description: 'Get a random inspirational quote' },
+        { name: 'hug', description: 'Hug a user', options: [{ name: 'user', type: 6, description: 'User to hug', required: true }] },
+        { name: 'slap', description: 'Slap a user', options: [{ name: 'user', type: 6, description: 'User to slap', required: true }] },
+        { name: 'highfive', description: 'Highfive a user', options: [{ name: 'user', type: 6, description: 'User to highfive', required: true }] },
+        { name: 'roll', description: 'Roll a dice' },
+        { name: 'pick', description: 'Pick one option', options: [{ name: 'options', type: 3, description: 'Separate options with |', required: true }] },
+        { name: 'ping', description: 'Check bot latency' },
+        { name: 'serverinfo', description: 'Get server info' },
+        { name: 'userinfo', description: 'Get info about a user', options: [{ name: 'user', type: 6, description: 'User to get info for', required: true }] },
+        { name: 'avatar', description: 'Get a user avatar', options: [{ name: 'user', type: 6, description: 'User', required: false }] },
+        { name: 'stealemoji', description: 'Steal emoji from another server', options: [{ name: 'emoji', type: 3, description: 'Emoji ID or URL', required: true }] },
+        { name: 'stealsticker', description: 'Steal sticker from another server', options: [{ name: 'sticker', type: 3, description: 'Sticker ID or URL', required: true }] }
     ];
 
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     try {
-        console.log('Started refreshing application (/) commands.');
+        console.log('Refreshing application (/) commands...');
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
         console.log('Slash commands registered!');
-    } catch (error) {
-        console.error('Error registering commands:', error);
+    } catch (err) {
+        console.error('Error registering slash commands:', err);
     }
 }
 
-// ------------------- Interaction Commands -------------------
+// ======================
+// Bot ready
+// ======================
+client.once('ready', async () => {
+    console.log(`Bot ready! Logged in as ${client.user.tag}`);
+    await registerSlashCommands();
+});
+
+// ======================
+// Slash command handler
+// ======================
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
+
+    const name = interaction.commandName;
+
     try {
-        if (interaction.commandName === 'translate') {
-            const lang = interaction.options.getString('lang');
-            const text = interaction.options.getString('text');
-            const result = await translate.default(text, { to: lang }).catch(() => null);
-            if (!result) return interaction.reply('Translation failed 😢');
-            interaction.reply(`**Translated (${lang}):** ${result.text}`);
-        }
-
-        const fetchTenor = async (keyword) => {
-            try {
-                const res = await axios.get(`https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(keyword)}&key=${TENOR_API_KEY}&limit=50&random=true`);
-                if (res.data.results && res.data.results.length > 0) {
-                    return res.data.results[Math.floor(Math.random() * res.data.results.length)].media_formats.gif.url;
-                }
-            } catch (err) { console.error(err); }
-            return null;
-        };
-
-        if (interaction.commandName === 'hug') {
-            const user = interaction.options.getUser('user');
-            const gif = await fetchTenor('hug');
+        // Interactive commands with Tenor GIFs
+        if (['hug', 'slap', 'highfive', 'goodmorning', 'welcome'].includes(name)) {
+            const target = interaction.options.getUser('user');
+            const gif = await fetchTenorGif(name);
             const embed = new EmbedBuilder()
-                .setTitle(`${interaction.user.username} hugs ${user.username}! 🤗`)
-                .setColor('Random')
-                .setImage(gif || null);
+                .setTitle(target ? `${interaction.user.username} ${name}s ${target.username}!` : `${interaction.user.username} says ${name}!`)
+                .setColor('Random');
+            if (gif) embed.setImage(gif);
             interaction.reply({ embeds: [embed] });
         }
 
-        if (interaction.commandName === 'slap') {
-            const user = interaction.options.getUser('user');
-            const gif = await fetchTenor('slap');
-            const embed = new EmbedBuilder()
-                .setTitle(`${interaction.user.username} slaps ${user.username}! 👋`)
-                .setColor('Random')
-                .setImage(gif || null);
-            interaction.reply({ embeds: [embed] });
+        if (name === 'gif') {
+            const keyword = interaction.options.getString('keyword');
+            const gif = await fetchTenorGif(keyword);
+            if (!gif) return interaction.reply('No GIF found 😢');
+            interaction.reply({ content: gif });
         }
 
-        if (interaction.commandName === 'highfive') {
-            const user = interaction.options.getUser('user');
-            const gif = await fetchTenor('highfive');
-            const embed = new EmbedBuilder()
-                .setTitle(`${interaction.user.username} highfives ${user.username}! ✋`)
-                .setColor('Random')
-                .setImage(gif || null);
-            interaction.reply({ embeds: [embed] });
-        }
-
-        if (interaction.commandName === 'stealemoji') {
+        if (name === 'stealemoji') {
             if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageEmojisAndStickers)) return interaction.reply('You need Manage Emojis & Stickers permission.');
-            const emojiId = interaction.options.getString('emoji');
+            const emojiInput = interaction.options.getString('emoji');
+            const url = emojiInput.includes('http') ? emojiInput : `https://cdn.discordapp.com/emojis/${emojiInput}.png`;
             try {
-                const emoji = await interaction.guild.emojis.create({ attachment: `https://cdn.discordapp.com/emojis/${emojiId}.png`, name: `emoji_${Date.now()}` });
+                const emoji = await interaction.guild.emojis.create({ attachment: url, name: `emoji_${Date.now()}` });
                 interaction.reply(`Emoji added: ${emoji}`);
-            } catch (err) { interaction.reply(`Failed to add emoji: ${err.message}`); console.error(err); }
+            } catch (err) {
+                console.error(err);
+                interaction.reply('Failed to add emoji.');
+            }
         }
 
-        if (interaction.commandName === 'stealsticker') {
+        if (name === 'stealsticker') {
             if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageEmojisAndStickers)) return interaction.reply('You need Manage Emojis & Stickers permission.');
-            const stickerId = interaction.options.getString('sticker');
+            const stickerInput = interaction.options.getString('sticker');
             try {
-                const sticker = await interaction.guild.stickers.create({ file: `https://cdn.discordapp.com/stickers/${stickerId}.png`, name: `sticker_${Date.now()}`, description: 'Stolen sticker', tags: 'fun' });
+                const sticker = await interaction.guild.stickers.create({
+                    file: stickerInput,
+                    name: `sticker_${Date.now()}`,
+                    description: 'Stolen sticker',
+                    tags: 'fun'
+                });
                 interaction.reply(`Sticker added: ${sticker.name}`);
-            } catch (err) { interaction.reply(`Failed to add sticker: ${err.message}`); console.error(err); }
+            } catch (err) {
+                console.error(err);
+                interaction.reply('Failed to add sticker.');
+            }
         }
+
+        // Simple response commands (ping)
+        if (name === 'ping') interaction.reply(`Pong! Latency is ${Date.now() - interaction.createdTimestamp}ms`);
 
     } catch (err) {
         console.error('Interaction error:', err);
@@ -151,98 +147,68 @@ client.on('interactionCreate', async interaction => {
     }
 });
 
-// ------------------- Prefix Commands -------------------
+// ======================
+// Prefix command handler
+// ======================
 client.on('messageCreate', async message => {
-    if (message.author.bot) return;
+    if (!message.content.startsWith(']') || message.author.bot) return;
 
-    const sendTenorGif = async (keyword, contentFallback) => {
-        try {
-            const gif = await axios.get(`https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(keyword)}&key=${TENOR_API_KEY}&limit=50&random=true`);
-            if (gif.data.results && gif.data.results.length > 0) {
-                const url = gif.data.results[Math.floor(Math.random() * gif.data.results.length)].media_formats.gif.url;
-                return { embeds: [new EmbedBuilder().setImage(url).setColor('Random')] };
-            }
-        } catch (err) { console.error(err); }
-        return contentFallback ? { content: contentFallback } : null;
-    };
-
-    // Auto-replies
-    const contentLower = message.content.toLowerCase();
-    if (contentLower.includes('good morning')) {
-        const embedResp = await sendTenorGif('good morning', 'Good morning!');
-        if (embedResp) message.channel.send(embedResp);
-    } else if (contentLower.includes('welcome')) {
-        const embedResp = await sendTenorGif('welcome', 'Welcome!');
-        if (embedResp) message.channel.send(embedResp);
-    }
-
-    // Commands
-    if (!message.content.startsWith(PREFIX)) return;
-    const args = message.content.slice(PREFIX.length).trim().split(/ +/);
+    const args = message.content.slice(1).trim().split(/ +/);
     const cmd = args.shift().toLowerCase();
 
     try {
-        if (cmd === 'help') {
+        if (cmd === 'roll') {
+            const result = Math.floor(Math.random() * 100) + 1;
+            message.reply(`🎲 You rolled: **${result}**`);
+        }
+
+        if (cmd === 'coinflip') {
+            const result = Math.random() < 0.5 ? 'Heads' : 'Tails';
+            message.reply(`🪙 ${result}`);
+        }
+
+        if (cmd === 'joke') message.reply('😂 Here is a random joke!'); // You can integrate an API
+        if (cmd === 'meme') message.reply('🖼️ Random meme!'); // API integration
+        if (cmd === 'cat') message.reply('🐱 Random cat!'); 
+        if (cmd === 'dog') message.reply('🐶 Random dog!');
+        if (cmd === '8ball') message.reply('🎱 The answer is yes!'); 
+        if (cmd === 'fact') message.reply('📚 Random fact!'); 
+        if (cmd === 'quote') message.reply('💡 Random quote!'); 
+
+        if (cmd === 'pick') {
+            if (!args.length) return message.reply('Provide options separated by |');
+            const options = args.join(' ').split('|').map(o => o.trim());
+            const choice = options[Math.floor(Math.random() * options.length)];
+            message.reply(`I pick: **${choice}**`);
+        }
+
+        if (cmd === 'avatar') {
+            const user = message.mentions.users.first() || message.author;
+            message.reply(user.displayAvatarURL({ dynamic: true, size: 1024 }));
+        }
+
+        if (cmd === 'serverinfo') {
             const embed = new EmbedBuilder()
-                .setTitle('🤖 Fun GIF Bot Commands')
-                .setColor('Random')
-                .setDescription(`
-All commands listed below:
-
-Auto replies:
-"good morning" → GIF
-"welcome" → GIF
-
-Fun:
-]joke, ]meme, ]cat, ]dog, ]8ball, ]coinflip, ]gif <keyword>, ]fact, ]quote, ]translate <lang> <text>
-
-Interactive:
-]hug @user, ]slap @user, ]highfive @user, ]roll, ]pick option1 | option2
-
-Utility:
-]ping, ]serverinfo, ]userinfo @user, ]avatar @user
-
-Steal:
-]stealemoji <emoji_id>
-]stealsticker <sticker_id>
-
-Enjoy! 🎉`);
-            message.channel.send({ embeds: [embed] });
+                .setTitle(message.guild.name)
+                .setDescription('Server info')
+                .addFields({ name: 'Members', value: `${message.guild.memberCount}`, inline: true })
+                .setColor('Random');
+            message.reply({ embeds: [embed] });
         }
 
-        if (cmd === 'translate') {
-            const lang = args.shift();
-            const text = args.join(' ');
-            const result = await translate.default(text, { to: lang }).catch(() => null);
-            message.channel.send(result ? `**Translated (${lang}):** ${result.text}` : 'Translation failed 😢');
+        if (cmd === 'userinfo') {
+            const user = message.mentions.users.first() || message.author;
+            const embed = new EmbedBuilder()
+                .setTitle(user.username)
+                .setDescription('User info')
+                .addFields({ name: 'ID', value: user.id, inline: true })
+                .setColor('Random');
+            message.reply({ embeds: [embed] });
         }
 
-        // Example fun commands
-        if (cmd === 'hug') {
-            const user = message.mentions.users.first();
-            if (!user) return message.channel.send('Mention someone to hug!');
-            const embedResp = await sendTenorGif('hug', `${message.author.username} hugs ${user.username}! 🤗`);
-            if (embedResp) message.channel.send(embedResp);
-        }
-
-        if (cmd === 'slap') {
-            const user = message.mentions.users.first();
-            if (!user) return message.channel.send('Mention someone to slap!');
-            const embedResp = await sendTenorGif('slap', `${message.author.username} slaps ${user.username}! 👋`);
-            if (embedResp) message.channel.send(embedResp);
-        }
-
-        if (cmd === 'highfive') {
-            const user = message.mentions.users.first();
-            if (!user) return message.channel.send('Mention someone to highfive!');
-            const embedResp = await sendTenorGif('highfive', `${message.author.username} highfives ${user.username}! ✋`);
-            if (embedResp) message.channel.send(embedResp);
-        }
-
-        // Add your other old fun/utility commands here (joke, meme, cat, dog, 8ball, coinflip, gif, fact, quote, ping, userinfo, serverinfo, avatar, roll, pick)
     } catch (err) {
         console.error('Prefix command error:', err);
-        message.channel.send('Something went wrong 😢');
+        message.reply('Something went wrong 😢');
     }
 });
 
