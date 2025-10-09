@@ -53,7 +53,7 @@ async function getRandomTenorGif() {
   }
 }
 
-client.on('ready', () => {
+client.once('ready', () => {
   console.log(`Bot is ready! Logged in as ${client.user.tag}`);
 });
 
