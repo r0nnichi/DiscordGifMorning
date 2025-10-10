@@ -1,11 +1,22 @@
-// index.js — full merged bot with prefix + slash commands, Tenor gifs fixed,
-// emoji/sticker stealing, persisted currency (JSON), help, and currency shop.
-// Install: npm i discord.js node-fetch
-// Start: node index.js
+// index.js — merged version of your bot with:
+// - original commands preserved
+// - slash + prefix support (shared handler)
+// - Tenor GIF helper (robust fallback)
+// - emoji/sticker stealers (attempts multiple URL forms)
+// - persistent economy (balances.json) with: balance, daily, pay, trade, inventory, shop, buy
+// - gambling: coinflip, slots, simplified poker (5-card evaluation) via ]gamble <amount> [type]
+// - owner-only give/take money
+// - fixes so slash commands call the same handler (more reliable than emitting fake messages)
+// Notes:
+// - Put DISCORD_TOKEN, TENOR_API_KEY, OWNER_ID, SELF_URL (optional) in .env
+// - npm i discord.js node-fetch express dotenv
+// - Start with: node index.js
+
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const fetch = require('node-fetch');
+const express = require('express');
 const {
   Client,
   GatewayIntentBits,
@@ -16,10 +27,12 @@ const {
   PermissionsBitField,
 } = require('discord.js');
 
-const TENOR_API_KEY = process.env.TENOR_API_KEY;
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const TENOR_API_KEY = process.env.TENOR_API_KEY;
+const OWNER_ID = process.env.OWNER_ID; // your discord id for owner-only commands
+
 if (!DISCORD_TOKEN) {
-  console.error('DISCORD_TOKEN missing in environment!');
+  console.error('DISCORD_TOKEN is required in .env');
   process.exit(1);
 }
 
@@ -36,73 +49,121 @@ const client = new Client({
 const PREFIX = ']';
 const DATA_FILE = path.join(__dirname, 'balances.json');
 
-// -------------------- Persistence helpers --------------------
+// ---------- Data persistence ----------
 function loadData() {
   try {
-    if (!fs.existsSync(DATA_FILE)) {
-      fs.writeFileSync(DATA_FILE, JSON.stringify({ users: {} }, null, 2));
-    }
+    if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, JSON.stringify({ users: {} }, null, 2));
     return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  } catch (err) {
-    console.error('Failed to load data file:', err);
+  } catch (e) {
+    console.error('Failed to load data file', e);
     return { users: {} };
   }
 }
 function saveData(data) {
   try {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-  } catch (err) {
-    console.error('Failed to save data file:', err);
+  } catch (e) {
+    console.error('Failed to save data file', e);
   }
 }
 const data = loadData();
 function ensureUser(id) {
-  if (!data.users[id]) data.users[id] = { balance: 0, lastDaily: 0 };
+  if (!data.users[id]) data.users[id] = { balance: 0, lastDaily: 0, inventory: [] };
   return data.users[id];
 }
 
-// -------------------- Keep-alive (for Render, Replit, etc.) --------------------
-const express = require('express');
+// ---------- Keep-alive (Render / Replit) ----------
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Discord Bot is alive!'));
+app.get('/', (req, res) => res.send('Bot is alive!'));
 app.listen(PORT, () => console.log(`Keep-alive server running on port ${PORT}`));
 
-// -------------------- Slash command registration --------------------
+// optional self-ping to keep service alive (can be disabled by setting SELF_PING=false)
+if (process.env.SELF_PING !== 'false') {
+  const SELF_URL = process.env.SELF_URL || `http://localhost:${PORT}/`;
+  setInterval(() => fetch(SELF_URL).catch(() => {}), 5 * 60 * 1000).unref();
+}
+
+// ---------- Tenor helper ----------
+async function getTenorGif(keyword) {
+  if (!TENOR_API_KEY) return null;
+  try {
+    const res = await fetch(`https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(keyword)}&key=${TENOR_API_KEY}&limit=20`);
+    const json = await res.json();
+    if (!json || !json.results || json.results.length === 0) return null;
+    const pick = json.results[Math.floor(Math.random() * json.results.length)];
+    // try several media formats
+    if (pick?.media_formats?.gif?.url) return pick.media_formats.gif.url;
+    if (pick?.media_formats?.mediumgif?.url) return pick.media_formats.mediumgif.url;
+    // fallback to first media url
+    const mf = Object.values(pick?.media_formats || {})[0];
+    if (mf?.url) return mf.url;
+    return pick.url || null;
+  } catch (err) {
+    console.error('Tenor API error:', err);
+    return null;
+  }
+}
+
+// ---------- Shop ----------
+const SHOP = [
+  { id: 'rolecolor', name: 'Role Color Change (mock perk)', price: 100 },
+  { id: 'nickname', name: 'Nickname Change (mock perk)', price: 50 },
+  { id: 'customemoji', name: 'Custom Emoji Slot (mock perk)', price: 200 },
+];
+
+// ---------- Slash registration ----------
 async function registerSlashCommands() {
   const commands = [
-    { name: 'help', description: 'Show all commands and usage' },
+    // fun + misc (original)
     { name: 'joke', description: 'Get a random joke' },
-    { name: 'meme', description: 'Get a random meme (Tenor)' },
-    { name: 'cat', description: 'Get a random cat gif (Tenor)' },
-    { name: 'dog', description: 'Get a random dog gif (Tenor)' },
-    {
-      name: '8ball',
-      description: 'Ask the magic 8ball',
-      options: [{ name: 'question', type: 3, description: 'Your question', required: true }],
-    },
+    { name: 'meme', description: 'Get a random meme' },
+    { name: 'cat', description: 'Get a random cat gif' },
+    { name: 'dog', description: 'Get a random dog gif' },
+    { name: '8ball', description: 'Ask the magic 8ball', options: [{ name: 'question', type: 3, description: 'Your question', required: true }] },
     { name: 'coinflip', description: 'Flip a coin' },
-    { name: 'gif', description: 'Search a gif (Tenor)', options: [{ name: 'keyword', type: 3, required: true }] },
+    { name: 'gif', description: 'Search a gif', options: [{ name: 'keyword', type: 3, description: 'Keyword', required: true }] },
     { name: 'fact', description: 'Get a random fact' },
     { name: 'quote', description: 'Get a random quote' },
-    { name: 'hug', description: 'Hug a user', options: [{ name: 'user', type: 6, required: true }] },
-    { name: 'slap', description: 'Slap a user', options: [{ name: 'user', type: 6, required: true }] },
-    { name: 'highfive', description: 'Highfive a user', options: [{ name: 'user', type: 6, required: true }] },
-    { name: 'touch', description: 'Touch a user', options: [{ name: 'user', type: 6, required: true }] },
+
+    // interactive
+    { name: 'hug', description: 'Hug a user', options: [{ name: 'user', type: 6, description: 'User to hug', required: true }] },
+    { name: 'slap', description: 'Slap a user', options: [{ name: 'user', type: 6, description: 'User to slap', required: true }] },
+    { name: 'highfive', description: 'Highfive a user', options: [{ name: 'user', type: 6, description: 'User to highfive', required: true }] },
+    { name: 'touch', description: 'Touch a user', options: [{ name: 'user', type: 6, description: 'User to touch', required: true }] },
     { name: 'roll', description: 'Roll a dice' },
-    { name: 'pick', description: 'Pick an option', options: [{ name: 'options', type: 3, required: true }] },
+    { name: 'pick', description: 'Pick an option', options: [{ name: 'options', type: 3, description: 'Options separated by |', required: true }] },
+
+    // utility
     { name: 'ping', description: 'Check bot latency' },
     { name: 'serverinfo', description: 'Get server info' },
-    { name: 'userinfo', description: 'Get user info', options: [{ name: 'user', type: 6, required: false }] },
-    { name: 'avatar', description: 'Get user avatar', options: [{ name: 'user', type: 6, required: false }] },
-    { name: 'stealemoji', description: 'Steal emoji from another server', options: [{ name: 'emoji', type: 3, required: true }] },
-    { name: 'stealsticker', description: 'Steal sticker from another server', options: [{ name: 'sticker', type: 3, required: true }] },
-    // Currency commands
-    { name: 'balance', description: 'Check your balance (or someone else)', options: [{ name: 'user', type: 6, required: false }] },
-    { name: 'daily', description: 'Claim daily reward' },
-    { name: 'gamble', description: 'Gamble some of your money', options: [{ name: 'amount', type: 3, required: true }] },
+    { name: 'userinfo', description: 'Get user info', options: [{ name: 'user', type: 6, description: 'User', required: false }] },
+    { name: 'avatar', description: 'Get user avatar', options: [{ name: 'user', type: 6, description: 'User', required: false }] },
+
+    // stealers
+    { name: 'stealemoji', description: 'Steal emoji from another server', options: [{ name: 'emoji', type: 3, description: 'Emoji (paste <:name:id> or id or URL)', required: true }] },
+    { name: 'stealsticker', description: 'Steal sticker from another server', options: [{ name: 'sticker', type: 3, description: 'Sticker id or URL', required: true }] },
+
+    // help
+    { name: 'help', description: 'Show all commands and usage' },
+
+    // economy
+    { name: 'balance', description: 'Check balance', options: [{ name: 'user', type: 6, description: 'User to check', required: false }] },
+    { name: 'daily', description: 'Claim daily coins' },
+    { name: 'pay', description: 'Send coins to another user', options: [{ name: 'user', type: 6, description: 'Recipient', required: true }, { name: 'amount', type: 4, description: 'Amount', required: true }] },
+    { name: 'inventory', description: 'Show your inventory' },
     { name: 'shop', description: 'Show the shop' },
-    { name: 'buy', description: 'Buy an item from the shop', options: [{ name: 'item', type: 3, required: true }] },
+    { name: 'buy', description: 'Buy an item', options: [{ name: 'item', type: 3, description: 'Item id', required: true }] },
+
+    // gamble
+    { name: 'gamble', description: 'Gamble coins: coin | slots | poker', options: [{ name: 'amount', type: 4, description: 'Amount', required: true }, { name: 'type', type: 3, description: 'coin|slots|poker', required: false }] },
+
+    // owner controls
+    { name: 'givemoney', description: '(Owner) Give money', options: [{ name: 'user', type: 6, description: 'User', required: true }, { name: 'amount', type: 4, description: 'Amount', required: true }] },
+    { name: 'takemoney', description: '(Owner) Take money', options: [{ name: 'user', type: 6, description: 'User', required: true }, { name: 'amount', type: 4, description: 'Amount', required: true }] },
+
+    // trade
+    { name: 'trade', description: 'Trade an item to another user (instant transfer)', options: [{ name: 'user', type: 6, description: 'Recipient', required: true }, { name: 'item', type: 3, description: 'Item id', required: true }] },
   ];
 
   const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
@@ -111,339 +172,458 @@ async function registerSlashCommands() {
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
     console.log('Slash commands registered!');
   } catch (err) {
-    console.error('Failed to register slash commands:', err);
+    console.error('Failed to register slash commands', err);
   }
 }
 
-// -------------------- Tenor helper (robust) --------------------
-async function getTenorGif(keyword) {
-  if (!TENOR_API_KEY) return null;
-  try {
-    const res = await fetch(`https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(keyword)}&key=${TENOR_API_KEY}&limit=20`);
-    const json = await res.json();
-    if (!json || !json.results || json.results.length === 0) return null;
-    const pick = json.results[Math.floor(Math.random() * json.results.length)];
-    // media_formats may vary, try common paths
-    if (pick?.media_formats?.gif?.url) return pick.media_formats.gif.url;
-    if (pick?.media_formats?.mediumgif?.url) return pick.media_formats.mediumgif.url;
-    if (pick?.content_description && pick?.url) return pick.url;
-    // fallback: try first media object url
-    const mf = Object.values(pick?.media_formats || {})[0];
-    if (mf?.url) return mf.url;
-    return null;
-  } catch (err) {
-    console.error('Tenor error:', err);
-    return null;
+// ---------- Poker helper (simple evaluator) ----------
+function createDeck() {
+  const suits = ['♠', '♥', '♦', '♣'];
+  const ranks = [2,3,4,5,6,7,8,9,10,11,12,13,14]; // 11-J,12-Q,13-K,14-A
+  const deck = [];
+  for (const s of suits) for (const r of ranks) deck.push({ r, s });
+  return deck;
+}
+function drawHand() {
+  const deck = createDeck();
+  const hand = [];
+  for (let i = 0; i < 5; i++) {
+    const idx = Math.floor(Math.random() * deck.length);
+    hand.push(deck.splice(idx,1)[0]);
   }
+  return hand;
+}
+function evaluateHand(hand) {
+  // returns {name, multiplier, rankValue} higher rankValue = better
+  const counts = {};
+  hand.forEach(c => counts[c.r] = (counts[c.r] || 0) + 1);
+  const countsArr = Object.values(counts).sort((a,b)=>b-a); // e.g. [3,2]
+  const uniqueRanks = Object.keys(counts).map(x=>parseInt(x,10)).sort((a,b)=>a-b);
+  const suits = hand.map(h=>h.s);
+  const flush = suits.every(s => s === suits[0]);
+  // straight detection (account for A low)
+  let straight = false;
+  // check normal
+  if (uniqueRanks.length === 5 && uniqueRanks[4] - uniqueRanks[0] === 4) straight = true;
+  // check wheel A-2-3-4-5
+  if (JSON.stringify(uniqueRanks) === JSON.stringify([2,3,4,5,14])) straight = true;
+  // rank checks
+  if (straight && flush) return { name: 'Straight Flush', multiplier: 8, rankValue: 800 };
+  if (countsArr[0] === 4) return { name: 'Four of a Kind', multiplier: 6, rankValue: 700 };
+  if (countsArr[0] === 3 && countsArr[1] === 2) return { name: 'Full House', multiplier: 4, rankValue: 600 };
+  if (flush) return { name: 'Flush', multiplier: 3.5, rankValue: 500 };
+  if (straight) return { name: 'Straight', multiplier: 3, rankValue: 400 };
+  if (countsArr[0] === 3) return { name: 'Three of a Kind', multiplier: 2.5, rankValue: 300 };
+  if (countsArr[0] === 2 && countsArr[1] === 2) return { name: 'Two Pair', multiplier: 2, rankValue: 200 };
+  if (countsArr[0] === 2) return { name: 'One Pair', multiplier: 1.5, rankValue: 100 };
+  return { name: 'High Card', multiplier: 0, rankValue: 10 };
 }
 
-// -------------------- Utility: make embed senders --------------------
-function makeContextForMessage(message) {
-  return {
-    send: content => message.channel.send(content),
-    reply: content => message.reply(content),
-    author: message.author,
-    guild: message.guild,
-    member: message.member,
-  };
-}
-function makeContextForInteraction(interaction) {
-  // We'll reply immediately; if later we need to update we can followup.
-  return {
-    send: content => interaction.reply(typeof content === 'string' ? { content } : content),
-    reply: content => interaction.reply(typeof content === 'string' ? { content } : content),
-    author: interaction.user,
-    guild: interaction.guild,
-    member: interaction.member,
-  };
-}
-
-// -------------------- Shop (simple) --------------------
-const SHOP = [
-  { id: 'rolecolor', name: 'Role Color Change (mock)', price: 100 },
-  { id: 'nickname', name: 'Nickname Change (mock)', price: 50 },
-  { id: 'customemoji', name: 'Custom Emoji Slot (mock)', price: 200 },
-];
-
-// -------------------- Command implementation (single shared) --------------------
+// ---------- Shared command handler ----------
 async function handleCommand(command, args, ctx) {
-  // ctx.send / ctx.reply available
+  // ctx must provide:
+  // - send(contentOrObject) => sends message or embed
+  // - author (User)
+  // - member (GuildMember) optional
+  // - guild optional
+  // also ctx._mentionedUser may be set (User)
   try {
-    switch (command) {
-      case 'help': {
-        const embed = new EmbedBuilder()
-          .setTitle('🤖 Fun GIF Bot Commands')
-          .setDescription(
-            `**Auto replies:**\n"good morning" → GIF\n"welcome" → GIF\n\n` +
-              `**Fun:**\n${PREFIX}joke, ${PREFIX}meme, ${PREFIX}cat, ${PREFIX}dog, ${PREFIX}8ball, ${PREFIX}coinflip, ${PREFIX}gif <keyword>, ${PREFIX}fact, ${PREFIX}quote\n\n` +
-              `**Interactive:**\n${PREFIX}hug @user, ${PREFIX}slap @user, ${PREFIX}highfive @user, ${PREFIX}touch @user, ${PREFIX}roll, ${PREFIX}pick option1 | option2\n\n` +
-              `**Utility:**\n${PREFIX}ping, ${PREFIX}serverinfo, ${PREFIX}userinfo @user, ${PREFIX}avatar @user\n\n` +
-              `**Steal:**\n${PREFIX}stealemoji <emoji_id or url>\n${PREFIX}stealsticker <sticker_id or url>\n\n` +
-              `**Currency:**\n${PREFIX}balance, ${PREFIX}daily, ${PREFIX}gamble <amount>, ${PREFIX}shop, ${PREFIX}buy <item>\n\nEnjoy! 🎉`
-          )
-          .setColor('Blue');
-        return ctx.send({ embeds: [embed] });
-      }
+    // Normalize command
+    command = (command || '').toLowerCase();
 
-      case 'ping':
-        return ctx.send(`🏓 Pong! Latency: ${Date.now() - (ctx.author ? ctx.author.createdAt?.getTime() || 0 : 0)}ms`);
+    // ---------- HELP ----------
+    if (command === 'help') {
+      const embed = new EmbedBuilder()
+        .setTitle('🤖 Fun GIF Bot Commands')
+        .setDescription(
+          `**Auto replies:**\n"good morning" → GIF\n"welcome" → GIF\n\n` +
+          `**Fun:**\n${PREFIX}joke, ${PREFIX}meme, ${PREFIX}cat, ${PREFIX}dog, ${PREFIX}8ball, ${PREFIX}coinflip, ${PREFIX}gif <keyword>, ${PREFIX}fact, ${PREFIX}quote\n\n` +
+          `**Interactive:**\n${PREFIX}hug @user, ${PREFIX}slap @user, ${PREFIX}highfive @user, ${PREFIX}touch @user, ${PREFIX}roll, ${PREFIX}pick option1 | option2\n\n` +
+          `**Utility:**\n${PREFIX}ping, ${PREFIX}serverinfo, ${PREFIX}userinfo @user, ${PREFIX}avatar @user\n\n` +
+          `**Steal:**\n${PREFIX}stealemoji <emoji_id or url or <:name:id>>\n${PREFIX}stealsticker <sticker_id or url>\n\n` +
+          `**Currency:**\n${PREFIX}balance, ${PREFIX}daily, ${PREFIX}pay <@user> <amount>, ${PREFIX}gamble <amount> [coin|slots|poker], ${PREFIX}shop, ${PREFIX}buy <item>, ${PREFIX}inventory, ${PREFIX}trade <@user> <item>\n\n` +
+          `**Owner:** givemoney, takemoney`
+        )
+        .setColor('Random');
+      return ctx.send({ embeds: [embed] });
+    }
 
-      case 'joke': {
-        const r = await fetch('https://v2.jokeapi.dev/joke/Any');
+    // ---------- PING ----------
+    if (command === 'ping') {
+      return ctx.send(`🏓 Pong! Latency: ${Date.now() - (ctx._msgCreatedAt || Date.now())}ms`);
+    }
+
+    // ---------- JOKE ----------
+    if (command === 'joke') {
+      const r = await fetch('https://v2.jokeapi.dev/joke/Any');
+      const d = await r.json();
+      return ctx.send(d.type === 'single' ? d.joke : `${d.setup}\n${d.delivery}`);
+    }
+
+    // ---------- MEME / GIFS ----------
+    if (command === 'meme') {
+      const url = await getTenorGif('meme');
+      return ctx.send(url || 'No meme GIF found 😢');
+    }
+    if (command === 'cat') {
+      const url = await getTenorGif('cat');
+      return ctx.send(url || 'No cat GIF found 😢');
+    }
+    if (command === 'dog') {
+      const url = await getTenorGif('dog');
+      return ctx.send(url || 'No dog GIF found 😢');
+    }
+
+    // ---------- 8BALL ----------
+    if (command === '8ball') {
+      const answers = ['Yes', 'No', 'Maybe', 'Definitely', 'Absolutely not', 'Ask again later'];
+      return ctx.send(answers[Math.floor(Math.random() * answers.length)]);
+    }
+
+    // ---------- COINFLIP ----------
+    if (command === 'coinflip') {
+      return ctx.send(Math.random() < 0.5 ? 'Heads' : 'Tails');
+    }
+
+    // ---------- GIF SEARCH ----------
+    if (command === 'gif') {
+      const keyword = args.join(' ');
+      if (!keyword) return ctx.send('Please provide a keyword.');
+      const url = await getTenorGif(keyword);
+      return ctx.send(url || 'No GIF found 😢');
+    }
+
+    // ---------- FACT ----------
+    if (command === 'fact') {
+      const r = await fetch('https://uselessfacts.jsph.pl/random.json?language=en');
+      const d = await r.json();
+      return ctx.send(d.text || 'No fact found.');
+    }
+
+    // ---------- QUOTE ----------
+    if (command === 'quote') {
+      try {
+        const r = await fetch('https://api.quotable.io/random');
         const d = await r.json();
-        return ctx.send(d.type === 'single' ? d.joke : `${d.setup}\n${d.delivery}`);
+        return ctx.send(`"${d.content}" — ${d.author}`);
+      } catch (e) {
+        return ctx.send('Something went wrong fetching a quote 😢');
+      }
+    }
+
+    // ---------- HUG / SLAP / HIGHFIVE / TOUCH ----------
+    if (['hug', 'slap', 'highfive', 'touch'].includes(command)) {
+      // Determine target:
+      let user = null;
+      if (ctx._mentionedUser) user = ctx._mentionedUser; // message mention or attached by interaction
+      else if (args && args[0]) {
+        const maybeId = args[0].replace(/[^0-9]/g, '');
+        if (ctx.guild && ctx.guild.members.cache.has(maybeId)) user = ctx.guild.members.cache.get(maybeId).user;
+      }
+      if (!user) return ctx.send('Please mention a user!');
+      const gif = await getTenorGif(command) || null;
+      const embed = new EmbedBuilder().setTitle(`${ctx.author.username} ${command}s ${user.username}!`);
+      if (gif) embed.setImage(gif);
+      embed.setColor('Random');
+      return ctx.send({ embeds: [embed] });
+    }
+
+    // ---------- ROLL ----------
+    if (command === 'roll') {
+      const roll = Math.floor(Math.random() * 100) + 1;
+      return ctx.send(`🎲 You rolled: ${roll}`);
+    }
+
+    // ---------- PICK ----------
+    if (command === 'pick') {
+      const options = args.join(' ').split('|').map(o => o.trim()).filter(Boolean);
+      if (options.length < 2) return ctx.send('Provide at least 2 options separated by |');
+      const choice = options[Math.floor(Math.random() * options.length)];
+      return ctx.send(`I pick: **${choice}**`);
+    }
+
+    // ---------- SERVER INFO ----------
+    if (command === 'serverinfo') {
+      if (!ctx.guild) return ctx.send('Not in a guild context.');
+      const embed = new EmbedBuilder()
+        .setTitle(ctx.guild.name)
+        .setDescription(`ID: ${ctx.guild.id}\nMembers: ${ctx.guild.memberCount}`)
+        .setColor('Random');
+      return ctx.send({ embeds: [embed] });
+    }
+
+    // ---------- USER INFO ----------
+    if (command === 'userinfo') {
+      let user = null;
+      if (args.length && ctx.guild) {
+        const id = args[0].replace(/[^0-9]/g, '');
+        user = ctx.guild.members.cache.get(id)?.user || null;
+      }
+      if (!user) user = ctx.author;
+      const embed = new EmbedBuilder()
+        .setTitle(user.tag)
+        .setDescription(`ID: ${user.id}`)
+        .setThumbnail(user.displayAvatarURL({ dynamic: true }))
+        .setColor('Random');
+      return ctx.send({ embeds: [embed] });
+    }
+
+    // ---------- AVATAR ----------
+    if (command === 'avatar') {
+      let user = null;
+      if (args.length && ctx.guild) {
+        const id = args[0].replace(/[^0-9]/g, '');
+        user = ctx.guild.members.cache.get(id)?.user || null;
+      }
+      if (!user) user = ctx.author;
+      return ctx.send(user.displayAvatarURL({ dynamic: true, size: 1024 }));
+    }
+
+    // ---------- STEAL EMOJI ----------
+    if (command === 'stealemoji') {
+      if (!ctx.member || !ctx.member.permissions?.has(PermissionsBitField.Flags.ManageEmojisAndStickers)) {
+        return ctx.send('You need Manage Emojis & Stickers permission to use this.');
+      }
+      const emojiInput = args[0];
+      if (!emojiInput) return ctx.send('Provide emoji (paste <:name:id>, id, or URL).');
+
+      // parse
+      let idMatch = emojiInput.match(/<a?:\w+:(\d+)>/);
+      let url = null;
+      let name = `emoji_${Date.now()}`;
+      if (emojiInput.startsWith('http')) url = emojiInput;
+      else if (idMatch) url = `https://cdn.discordapp.com/emojis/${idMatch[1]}.png`;
+      else if (/^\d+$/.test(emojiInput)) url = `https://cdn.discordapp.com/emojis/${emojiInput}.png`;
+      else {
+        // attempt direct image URL fallback
+        url = emojiInput;
       }
 
-      case 'meme': {
-        const url = await getTenorGif('meme');
-        return ctx.send(url || 'No meme GIF found 😢');
+      try {
+        const created = await ctx.guild.emojis.create({ attachment: url, name });
+        return ctx.send(`Emoji added: ${created}`);
+      } catch (err) {
+        console.error('Add emoji failed', err);
+        return ctx.send(`Failed to add emoji: ${err?.message || err}`);
       }
+    }
 
-      case 'cat': {
-        const url = await getTenorGif('cat');
-        return ctx.send(url || 'No cat GIF found 😢');
+    // ---------- STEAL STICKER ----------
+    if (command === 'stealsticker') {
+      if (!ctx.member || !ctx.member.permissions?.has(PermissionsBitField.Flags.ManageEmojisAndStickers)) {
+        return ctx.send('You need Manage Emojis & Stickers permission to use this.');
       }
-
-      case 'dog': {
-        const url = await getTenorGif('dog');
-        return ctx.send(url || 'No dog GIF found 😢');
+      const stickerInput = args[0];
+      if (!stickerInput) return ctx.send('Provide a sticker id or URL.');
+      let url = stickerInput.startsWith('http') ? stickerInput : `https://cdn.discordapp.com/stickers/${stickerInput}.png`;
+      try {
+        const sticker = await ctx.guild.stickers.create({
+          file: url,
+          name: `sticker_${Date.now()}`,
+          description: 'Imported sticker',
+          tags: 'fun',
+        });
+        return ctx.send(`Sticker added: ${sticker.name}`);
+      } catch (err) {
+        console.error('Add sticker failed', err);
+        return ctx.send(`Failed to add sticker: ${err?.message || err}`);
       }
+    }
 
-      case '8ball': {
-        const answers = ['Yes', 'No', 'Maybe', 'Definitely', 'Absolutely not', 'Ask again later', 'I don’t know'];
-        return ctx.send(answers[Math.floor(Math.random() * answers.length)]);
+    // ------------------- ECONOMY -------------------
+
+    // BALANCE
+    if (command === 'balance') {
+      let id = args[0] ? args[0].replace(/[^0-9]/g, '') : ctx.author.id;
+      // if args[0] is mention like <@id>
+      if (!id) id = ctx.author.id;
+      const u = ensureUser(id);
+      saveData(data);
+      const embed = new EmbedBuilder().setTitle('Balance').setDescription(`<@${id}> has **${u.balance}** coins`).setColor('Gold');
+      return ctx.send({ embeds: [embed] });
+    }
+
+    // DAILY
+    if (command === 'daily') {
+      const uid = ctx.author.id;
+      const u = ensureUser(uid);
+      const now = Date.now();
+      const oneDay = 24 * 60 * 60 * 1000;
+      if (now - (u.lastDaily || 0) < oneDay) {
+        const left = Math.ceil((oneDay - (now - u.lastDaily)) / (60 * 60 * 1000));
+        return ctx.send(`You already claimed daily. Try again in about ${left} hour(s).`);
       }
+      const amount = 100;
+      u.balance += amount;
+      u.lastDaily = now;
+      saveData(data);
+      return ctx.send(`You claimed your daily **${amount}** coins!`);
+    }
 
-      case 'coinflip':
-        return ctx.send(Math.random() < 0.5 ? 'Heads 🪙' : 'Tails 🪙');
+    // PAY / SEND
+    if (command === 'pay' || command === 'send') {
+      const targetId = (args[0] || '').replace(/[^0-9]/g, '');
+      const amt = parseInt(args[1], 10);
+      if (!targetId || !amt || amt <= 0) return ctx.send('Usage: pay <@user> <amount>');
+      if (targetId === ctx.author.id) return ctx.send("You can't pay yourself.");
+      const sender = ensureUser(ctx.author.id);
+      if (sender.balance < amt) return ctx.send("You don't have enough coins.");
+      const receiver = ensureUser(targetId);
+      sender.balance -= amt;
+      receiver.balance += amt;
+      saveData(data);
+      return ctx.send(`✅ Sent **${amt}** coins to <@${targetId}>. Your new balance: **${sender.balance}**`);
+    }
 
-      case 'gif': {
-        const keyword = args.join(' ');
-        if (!keyword) return ctx.send('Please provide a keyword.');
-        const url = await getTenorGif(keyword);
-        return ctx.send(url || 'No GIF found 😢');
-      }
+    // INVENTORY
+    if (command === 'inventory' || command === 'inv') {
+      const uid = ctx.author.id;
+      const u = ensureUser(uid);
+      const inv = (u.inventory || []);
+      if (!inv.length) return ctx.send('Your inventory is empty.');
+      return ctx.send({ embeds: [new EmbedBuilder().setTitle(`${ctx.author.username}'s Inventory`).setDescription(inv.map(i => `• ${i}`).join('\n')).setColor('Blue')] });
+    }
 
-      case 'fact': {
-        const r = await fetch('https://uselessfacts.jsph.pl/random.json?language=en');
-        const d = await r.json();
-        return ctx.send(d.text || 'No fact found.');
-      }
+    // SHOP
+    if (command === 'shop') {
+      const embed = new EmbedBuilder().setTitle('Shop').setColor('Purple');
+      embed.setDescription(SHOP.map(i => `**${i.id}** — ${i.name} — ${i.price} coins`).join('\n'));
+      return ctx.send({ embeds: [embed] });
+    }
 
-      case 'quote': {
-        try {
-          const r = await fetch('https://api.quotable.io/random');
-          const d = await r.json();
-          return ctx.send(`"${d.content}" — ${d.author}`);
-        } catch {
-          return ctx.send('Something went wrong fetching a quote 😢');
-        }
-      }
+    // BUY
+    if (command === 'buy') {
+      const itemId = args[0];
+      if (!itemId) return ctx.send('Usage: buy <item_id>');
+      const item = SHOP.find(s => s.id.toLowerCase() === itemId.toLowerCase());
+      if (!item) return ctx.send('Item not found.');
+      const u = ensureUser(ctx.author.id);
+      if (u.balance < item.price) return ctx.send("You don't have enough coins.");
+      u.balance -= item.price;
+      u.inventory = u.inventory || [];
+      u.inventory.push(item.id);
+      saveData(data);
+      return ctx.send(`You bought **${item.name}** for **${item.price}** coins.`);
+    }
 
-      case 'hug':
-      case 'slap':
-      case 'highfive':
-      case 'touch': {
-        const target = args[0] && typeof args[0] === 'string' && ctx.guild ? (ctx.guild.members.cache.get(args[0]) || null) : null;
-        // When used from message, args parsing uses mentions; when slash, args[0] will be user id
-        let user;
-        if (target) user = target.user;
-        else if (ctx.author && args.length && args[0].startsWith('<@')) {
-          // mention string
-          const id = args[0].replace(/[^0-9]/g, '');
-          user = ctx.guild?.members.cache.get(id)?.user || null;
-        } else {
-          // fallback: in message handler we will pass message.mentions
-          user = ctx._mentionedUser || null;
-        }
-        if (!user) return ctx.send('Please mention a user!');
-        const gif = await getTenorGif(command) || null;
-        const embed = new EmbedBuilder().setTitle(`${ctx.author.username} ${command}s ${user.username}!`);
-        if (gif) embed.setImage(gif);
-        embed.setColor('Random');
-        return ctx.send({ embeds: [embed] });
-      }
+    // TRADE (immediate transfer)
+    if (command === 'trade') {
+      const targetId = (args[0] || '').replace(/[^0-9]/g, '');
+      const itemId = args[1];
+      if (!targetId || !itemId) return ctx.send('Usage: trade <@user> <item_id>');
+      const me = ensureUser(ctx.author.id);
+      const you = ensureUser(targetId);
+      if (!me.inventory || !me.inventory.includes(itemId)) return ctx.send("You don't own that item.");
+      // remove from sender
+      me.inventory = me.inventory.filter(i => i !== itemId);
+      you.inventory = you.inventory || [];
+      you.inventory.push(itemId);
+      saveData(data);
+      return ctx.send(`Transferred **${itemId}** to <@${targetId}>.`);
+    }
 
-      case 'roll': {
-        const roll = Math.floor(Math.random() * 6) + 1;
-        return ctx.send(`🎲 You rolled: ${roll}`);
-      }
+    // GAMBLE
+    if (command === 'gamble' || command === 'bet') {
+      let amt = parseInt(args[0], 10);
+      const type = (args[1] || 'coin').toLowerCase();
+      if (!amt || amt <= 0) return ctx.send('Usage: gamble <amount> [coin|slots|poker]');
+      const u = ensureUser(ctx.author.id);
+      if (amt > u.balance) return ctx.send("You don't have enough coins.");
 
-      case 'pick': {
-        const options = args.join(' ').split('|').map(s => s.trim()).filter(Boolean);
-        if (options.length < 2) return ctx.send('Provide at least 2 options separated by |');
-        const choice = options[Math.floor(Math.random() * options.length)];
-        return ctx.send(`I pick: **${choice}**`);
-      }
-
-      case 'serverinfo': {
-        const g = ctx.guild;
-        if (!g) return ctx.send('Not in a guild context.');
-        const embed = new EmbedBuilder()
-          .setTitle(g.name)
-          .setDescription(`ID: ${g.id}\nMembers: ${g.memberCount}\nRegion: ${g.preferredLocale || 'N/A'}`)
-          .setColor('Green');
-        return ctx.send({ embeds: [embed] });
-      }
-
-      case 'userinfo': {
-        // args[0] might be user id
-        let user = null;
-        if (args.length && ctx.guild) {
-          const id = args[0].replace(/[^0-9]/g, '');
-          user = ctx.guild.members.cache.get(id)?.user || null;
-        }
-        if (!user) user = ctx.author;
-        const embed = new EmbedBuilder()
-          .setTitle(user.tag)
-          .addFields({ name: 'ID', value: user.id, inline: true })
-          .setThumbnail(user.displayAvatarURL({ dynamic: true }))
-          .setColor('Blue');
-        return ctx.send({ embeds: [embed] });
-      }
-
-      case 'avatar': {
-        let user = null;
-        if (args.length && ctx.guild) {
-          const id = args[0].replace(/[^0-9]/g, '');
-          user = ctx.guild.members.cache.get(id)?.user || null;
-        }
-        if (!user) user = ctx.author;
-        return ctx.send(user.displayAvatarURL({ dynamic: true, size: 1024 }));
-      }
-
-      case 'stealemoji': {
-        if (!ctx.member || !ctx.member.permissions?.has(PermissionsBitField.Flags.ManageEmojisAndStickers))
-          return ctx.send('You need Manage Emojis & Stickers permission to use this.');
-        const emojiInput = args[0];
-        if (!emojiInput) return ctx.send('Provide an emoji id or direct URL.');
-        // If user pasted <:name:id> extract id
-        const idMatch = emojiInput.match(/:(\d+)>?$/);
-        let url = null;
-        if (emojiInput.startsWith('http')) url = emojiInput;
-        else if (idMatch) url = `https://cdn.discordapp.com/emojis/${idMatch[1]}.png`;
-        else if (/^\d+$/.test(emojiInput)) url = `https://cdn.discordapp.com/emojis/${emojiInput}.png`;
-        else return ctx.send('Unrecognized emoji input. Paste emoji (like <:name:id>) or an emoji id or a URL.');
-
-        try {
-          const created = await ctx.guild.emojis.create({ attachment: url, name: `emoji_${Date.now()}` });
-          return ctx.send(`Emoji added: ${created}`);
-        } catch (err) {
-          console.error('Add emoji failed:', err);
-          return ctx.send(`Failed to add emoji: ${err?.message || err}`);
-        }
-      }
-
-      case 'stealsticker': {
-        if (!ctx.member || !ctx.member.permissions?.has(PermissionsBitField.Flags.ManageEmojisAndStickers))
-          return ctx.send('You need Manage Emojis & Stickers permission to use this.');
-        const stickerInput = args[0];
-        if (!stickerInput) return ctx.send('Provide a sticker id or URL.');
-        // For stickers, Discord CDN: /stickers/{id}.png (static) or .png? Need to fetch actual URL from guilds if available.
-        let url = stickerInput.startsWith('http') ? stickerInput : `https://cdn.discordapp.com/stickers/${stickerInput}.png`;
-        try {
-          const sticker = await ctx.guild.stickers.create({
-            file: url,
-            name: `sticker_${Date.now()}`,
-            description: 'Imported sticker',
-            tags: 'fun',
-          });
-          return ctx.send(`Sticker added: ${sticker.name}`);
-        } catch (err) {
-          console.error('Add sticker failed:', err);
-          return ctx.send(`Failed to add sticker: ${err?.message || err}`);
-        }
-      }
-
-      // ---------------- Currency commands ----------------
-      case 'balance': {
-        const targetId = args[0] ? args[0].replace(/[^0-9]/g, '') : ctx.author.id;
-        const userData = ensureUser(targetId);
-        saveData(data);
-        const embed = new EmbedBuilder()
-          .setTitle('Balance')
-          .setDescription(`<@${targetId}> has **${userData.balance}** coins`)
-          .setColor('Gold');
-        return ctx.send({ embeds: [embed] });
-      }
-
-      case 'daily': {
-        const uid = ctx.author.id;
-        const userData = ensureUser(uid);
-        const now = Date.now();
-        const oneDay = 24 * 60 * 60 * 1000;
-        if (now - (userData.lastDaily || 0) < oneDay) {
-          const left = Math.ceil((oneDay - (now - userData.lastDaily)) / (60 * 60 * 1000));
-          return ctx.send(`You already claimed daily. Try again in about ${left} hour(s).`);
-        }
-        const amount = 100;
-        userData.balance += amount;
-        userData.lastDaily = now;
-        saveData(data);
-        return ctx.send(`You claimed your daily **${amount}** coins!`);
-      }
-
-      case 'gamble': {
-        let amt = args[0];
-        if (!amt) return ctx.send('Usage: gamble <amount> (or "all")');
-        const uid = ctx.author.id;
-        const userData = ensureUser(uid);
-        if (amt === 'all') amt = userData.balance;
-        amt = parseInt(amt, 10);
-        if (!amt || amt <= 0) return ctx.send('Provide a valid amount.');
-        if (amt > userData.balance) return ctx.send("You don't have enough coins.");
+      // COIN
+      if (type === 'coin' || type === 'coinflip') {
         const win = Math.random() < 0.5;
         if (win) {
-          userData.balance += amt;
+          u.balance += amt;
           saveData(data);
-          return ctx.send(`You won! You gained **${amt}** coins. New balance: **${userData.balance}**`);
+          return ctx.send(`You won! You gained **${amt}** coins. New balance: **${u.balance}**`);
         } else {
-          userData.balance -= amt;
+          u.balance -= amt;
           saveData(data);
-          return ctx.send(`You lost **${amt}** coins. New balance: **${userData.balance}**`);
+          return ctx.send(`You lost **${amt}** coins. New balance: **${u.balance}**`);
         }
       }
 
-      case 'shop': {
-        const embed = new EmbedBuilder().setTitle('Shop').setColor('Purple');
-        const lines = SHOP.map(i => `**${i.id}** — ${i.name} — ${i.price} coins`);
-        embed.setDescription(lines.join('\n'));
-        return ctx.send({ embeds: [embed] });
+      // SLOTS (3 symbols)
+      if (type === 'slots') {
+        const symbols = ['🍒','🍋','🍊','🍇','🔔','⭐'];
+        const s1 = symbols[Math.floor(Math.random()*symbols.length)];
+        const s2 = symbols[Math.floor(Math.random()*symbols.length)];
+        const s3 = symbols[Math.floor(Math.random()*symbols.length)];
+        let payout = 0;
+        if (s1 === s2 && s2 === s3) payout = amt * 5;
+        else if (s1 === s2 || s2 === s3 || s1 === s3) payout = amt * 2;
+        if (payout > 0) {
+          u.balance += payout;
+          saveData(data);
+          return ctx.send(`Slots result: ${s1} ${s2} ${s3}\n🎉 You won **${payout}** coins! New balance: **${u.balance}**`);
+        } else {
+          u.balance -= amt;
+          saveData(data);
+          return ctx.send(`Slots result: ${s1} ${s2} ${s3}\n😢 You lost **${amt}** coins. New balance: **${u.balance}**`);
+        }
       }
 
-      case 'buy': {
-        const itemId = args[0];
-        if (!itemId) return ctx.send('Usage: buy <item_id>');
-        const item = SHOP.find(s => s.id.toLowerCase() === itemId.toLowerCase());
-        if (!item) return ctx.send('Item not found.');
-        const uid = ctx.author.id;
-        const userData = ensureUser(uid);
-        if (userData.balance < item.price) return ctx.send("You don't have enough coins.");
-        userData.balance -= item.price;
-        saveData(data);
-        // NOTE: this example does not actually change server settings (mock perks).
-        return ctx.send(`You bought **${item.name}** for **${item.price}** coins. (This is a mock perk.)`);
+      // POKER (simplified 5-card evaluation)
+      if (type === 'poker') {
+        const hand = drawHand();
+        const evalRes = evaluateHand(hand);
+        // If multiplier 0 => lose
+        if (evalRes.multiplier > 0) {
+          const gain = Math.floor(amt * evalRes.multiplier);
+          u.balance += gain;
+          saveData(data);
+          // format hand nicely
+          const handStr = hand.map(c => `${c.r}${c.s}`).join(' ');
+          return ctx.send(`Your poker hand: ${handStr}\n${evalRes.name} — You won **${gain}** coins! New balance: **${u.balance}**`);
+        } else {
+          u.balance -= amt;
+          saveData(data);
+          const handStr = hand.map(c => `${c.r}${c.s}`).join(' ');
+          return ctx.send(`Your poker hand: ${handStr}\n${evalRes.name} — You lost **${amt}** coins. New balance: **${u.balance}**`);
+        }
       }
 
-      default:
-        return ctx.send("Unknown command. Use help to see available commands.");
+      return ctx.send('Unknown gamble type. Use coin, slots, or poker.');
     }
+
+    // OWNER give/take
+    if (command === 'givemoney' || command === 'givemoney') {
+      if (ctx.author.id !== OWNER_ID) return ctx.send('Only the owner can do that.');
+      const target = (args[0] || '').replace(/[^0-9]/g, '');
+      const amount = parseInt(args[1], 10);
+      if (!target || !amount) return ctx.send('Usage: givemoney <user_id or @user> <amount>');
+      const u = ensureUser(target);
+      u.balance += amount;
+      saveData(data);
+      return ctx.send(`Gave ${amount} coins to <@${target}>.`);
+    }
+
+    if (command === 'takemoney') {
+      if (ctx.author.id !== OWNER_ID) return ctx.send('Only the owner can do that.');
+      const target = (args[0] || '').replace(/[^0-9]/g, '');
+      const amount = parseInt(args[1], 10);
+      if (!target || !amount) return ctx.send('Usage: takemoney <user_id or @user> <amount>');
+      const u = ensureUser(target);
+      u.balance = Math.max(0, u.balance - amount);
+      saveData(data);
+      return ctx.send(`Took ${amount} coins from <@${target}>.`);
+    }
+
+    // fallback to unknown command
+    return ctx.send('Unknown command. Use help to see available commands.');
   } catch (err) {
-    console.error('handleCommand error:', err);
-    try {
-      return ctx.send('Something went wrong executing the command 😢');
-    } catch (e) {
-      console.error('Failed to report error to user:', e);
-    }
+    console.error('Command execution error:', err);
+    try { return ctx.send('Something went wrong executing that command 😢'); } catch (e) { console.error('Also failed to send error to user', e); }
   }
 }
 
-// -------------------- Message (prefix) handler --------------------
+// ---------- Message (prefix) handler ----------
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
 
-  // Auto replies (no prefix)
-  const content = message.content.toLowerCase();
+  // Auto replies
+  const content = (message.content || '').toLowerCase();
   if (content.includes('good morning')) {
     const gif = await getTenorGif('good morning');
     return message.channel.send(gif || 'Good morning! 🌞');
@@ -455,60 +635,86 @@ client.on('messageCreate', async message => {
 
   if (!message.content.startsWith(PREFIX)) return;
 
-  // parse
   const raw = message.content.slice(PREFIX.length).trim();
   if (!raw) return;
   const parts = raw.split(/ +/);
   const command = parts.shift().toLowerCase();
   const args = parts;
 
-  // for interactive commands using mentions, attach mentioned user to ctx
-  const ctx = makeContextForMessage(message);
-  // attach convenience for mentioned user
-  if (message.mentions && message.mentions.users && message.mentions.users.first) {
-    ctx._mentionedUser = message.mentions.users.first();
-  }
+  // Build ctx for message
+  const ctx = {
+    send: c => message.channel.send(c),
+    reply: c => message.reply(c),
+    author: message.author,
+    member: message.member,
+    guild: message.guild,
+    channel: message.channel,
+    _mentionedUser: message.mentions?.users?.first?.() || null,
+    _msgCreatedAt: message.createdTimestamp
+  };
 
-  // call shared handler
   await handleCommand(command, args, ctx);
 });
 
-// -------------------- Interaction (slash) handler --------------------
+// ---------- Interaction (slash) handler ----------
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
   const commandName = interaction.commandName;
-  const opts = interaction.options.data || [];
-  // Build args array: for user type options we will pass user id; others pass value
+  const opts = interaction.options?.data || [];
+
+  // build args: user options -> ids, string options -> strings, integer -> stringified number
   const args = opts.map(o => {
-    if (o.type === 6) return o.value; // user id
+    if (o.type === 6) return String(o.value); // user id
+    if (o.type === 4) return String(o.value); // integer
     return String(o.value);
   });
 
-  const ctx = makeContextForInteraction(interaction);
-
-  // attach mentioned user when appropriate (so hug/slap can use it)
-  if (opts.length) {
-    const userOpt = opts.find(o => o.type === 6);
-    if (userOpt) {
-      // fetch member if possible
+  // build ctx for interaction
+  let replied = false;
+  const ctx = {
+    send: async content => {
       try {
-        const mem = await interaction.guild.members.fetch(userOpt.value);
-        if (mem) ctx._mentionedUser = mem.user;
-      } catch {}
+        if (!replied) {
+          replied = true;
+          return await interaction.reply(typeof content === 'string' ? { content } : content);
+        } else {
+          return await interaction.followUp(typeof content === 'string' ? { content } : content);
+        }
+      } catch (err) {
+        console.error('Interaction send error', err);
+      }
+    },
+    reply: async content => {
+      return ctx.send(content);
+    },
+    author: interaction.user,
+    member: interaction.member,
+    guild: interaction.guild,
+    channel: interaction.channel,
+    _mentionedUser: null
+  };
+
+  // If there's a user option, attach the user object to ctx._mentionedUser
+  const userOpt = opts.find(o => o.type === 6);
+  if (userOpt && interaction.guild) {
+    try {
+      const mem = await interaction.guild.members.fetch(userOpt.value);
+      if (mem) ctx._mentionedUser = mem.user;
+    } catch (e) {
+      // ignore
     }
   }
 
-  // run command
   await handleCommand(commandName, args, ctx);
 });
 
-// -------------------- Ready --------------------
+// ---------- Ready ----------
 client.once('ready', async () => {
   console.log(`Bot ready! Logged in as ${client.user.tag}`);
-  await registerSlashCommands().catch(console.error);
+  await registerSlashCommands().catch(err => console.error('Slash reg error', err));
 });
 
-// -------------------- Login --------------------
+// ---------- Login ----------
 client.login(DISCORD_TOKEN).catch(err => {
   console.error('Login failed:', err);
   process.exit(1);
