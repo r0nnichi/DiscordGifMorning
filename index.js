@@ -1,17 +1,8 @@
-// index.js — improved version of the bot:
-// - Fixed animated emoji stealing (detect <a: and use .gif)
-// - Poker hand display: Map ranks to J/Q/K/A
-// - Standardized gambling: Always subtract bet first, then add payout on win (e.g., coinflip win: add 2*amt for net +amt profit)
-// - Added echo question to 8ball
-// - Removed duplicate givemoney condition
-// - Added "User not found" for userinfo/avatar if invalid
-// - Added simple cooldown for gamble (10s per user, using Map)
-// - Added leaderboard command (top 5 balances)
-// - Improved error handling and logging (console.log for commands)
-// - Minor UX: Better messages, consistent embeds
-// - For stickers: Attempt .png, fallback to .gif if fails (rare but covers animated)
-// - Shop items remain mock, but added 'use' command stub (replies "Used item!" for now)
-// - No changes to hosting/setup; assumes same .env and deps
+// index.js — debug version with higher shop prices and added console logs for troubleshooting:
+// - Shop prices increased: 500, 250, 1000 (daily is 100, so rarer items)
+// - Added console logs in key places: ready, messageCreate (prefix detection), interactionCreate, handleCommand start/error
+// - Logs will help see if events fire and where it fails
+// - No other changes; redeploy and check Render logs when triggering commands
 
 require('dotenv').config();
 const fs = require('fs');
@@ -108,11 +99,11 @@ async function getTenorGif(keyword) {
   }
 }
 
-// ---------- Shop ----------
+// ---------- Shop (higher prices) ----------
 const SHOP = [
-  { id: 'rolecolor', name: 'Role Color Change (mock perk)', price: 100 },
-  { id: 'nickname', name: 'Nickname Change (mock perk)', price: 50 },
-  { id: 'customemoji', name: 'Custom Emoji Slot (mock perk)', price: 200 },
+  { id: 'rolecolor', name: 'Role Color Change (mock perk)', price: 500 },
+  { id: 'nickname', name: 'Nickname Change (mock perk)', price: 250 },
+  { id: 'customemoji', name: 'Custom Emoji Slot (mock perk)', price: 1000 },
 ];
 
 // ---------- Slash registration ----------
@@ -236,7 +227,7 @@ async function handleCommand(command, args, ctx) {
   // also ctx._mentionedUser may be set (User)
   try {
     command = (command || '').toLowerCase();
-    console.log(`Executing command: ${command} by ${ctx.author.id}`);
+    console.log(`Executing command: ${command} by ${ctx.author.id} in guild ${ctx.guild?.id || 'DM'}`);
 
     // ---------- HELP ----------
     if (command === 'help') {
@@ -693,6 +684,8 @@ client.on('messageCreate', async message => {
 
   if (!message.content.startsWith(PREFIX)) return;
 
+  console.log(`Prefix command detected in message: ${message.content} by ${message.author.id} in guild ${message.guild?.id}`);
+
   const raw = message.content.slice(PREFIX.length).trim();
   if (!raw) return;
   const parts = raw.split(/ +/);
@@ -716,6 +709,9 @@ client.on('messageCreate', async message => {
 // ---------- Interaction (slash) handler ----------
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
+
+  console.log(`Slash command detected: ${interaction.commandName} by ${interaction.user.id} in guild ${interaction.guild?.id}`);
+
   const commandName = interaction.commandName;
   const opts = interaction.options?.data || [];
 
@@ -769,7 +765,10 @@ client.once('ready', async () => {
 });
 
 // ---------- Login ----------
-client.login(DISCORD_TOKEN).catch(err => {
+console.log('Starting bot login...');
+client.login(DISCORD_TOKEN).then(() => {
+  console.log('Login successful');
+}).catch(err => {
   console.error('Login failed:', err);
   process.exit(1);
 });
