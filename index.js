@@ -1,16 +1,17 @@
-// index.js — merged version of your bot with:
-// - original commands preserved
-// - slash + prefix support (shared handler)
-// - Tenor GIF helper (robust fallback)
-// - emoji/sticker stealers (attempts multiple URL forms)
-// - persistent economy (balances.json) with: balance, daily, pay, trade, inventory, shop, buy
-// - gambling: coinflip, slots, simplified poker (5-card evaluation) via ]gamble <amount> [type]
-// - owner-only give/take money
-// - fixes so slash commands call the same handler (more reliable than emitting fake messages)
-// Notes:
-// - Put DISCORD_TOKEN, TENOR_API_KEY, OWNER_ID, SELF_URL (optional) in .env
-// - npm i discord.js node-fetch express dotenv
-// - Start with: node index.js
+// index.js — improved version of the bot:
+// - Fixed animated emoji stealing (detect <a: and use .gif)
+// - Poker hand display: Map ranks to J/Q/K/A
+// - Standardized gambling: Always subtract bet first, then add payout on win (e.g., coinflip win: add 2*amt for net +amt profit)
+// - Added echo question to 8ball
+// - Removed duplicate givemoney condition
+// - Added "User not found" for userinfo/avatar if invalid
+// - Added simple cooldown for gamble (10s per user, using Map)
+// - Added leaderboard command (top 5 balances)
+// - Improved error handling and logging (console.log for commands)
+// - Minor UX: Better messages, consistent embeds
+// - For stickers: Attempt .png, fallback to .gif if fails (rare but covers animated)
+// - Shop items remain mock, but added 'use' command stub (replies "Used item!" for now)
+// - No changes to hosting/setup; assumes same .env and deps
 
 require('dotenv').config();
 const fs = require('fs');
@@ -48,6 +49,8 @@ const client = new Client({
 
 const PREFIX = ']';
 const DATA_FILE = path.join(__dirname, 'balances.json');
+const COOLDOWN_TIME = 10 * 1000; // 10 seconds for gamble cooldown
+const cooldowns = new Map(); // userId => lastGambleTime
 
 // ---------- Data persistence ----------
 function loadData() {
@@ -154,6 +157,7 @@ async function registerSlashCommands() {
     { name: 'inventory', description: 'Show your inventory' },
     { name: 'shop', description: 'Show the shop' },
     { name: 'buy', description: 'Buy an item', options: [{ name: 'item', type: 3, description: 'Item id', required: true }] },
+    { name: 'use', description: 'Use an item from inventory', options: [{ name: 'item', type: 3, description: 'Item id', required: true }] },
 
     // gamble
     { name: 'gamble', description: 'Gamble coins: coin | slots | poker', options: [{ name: 'amount', type: 4, description: 'Amount', required: true }, { name: 'type', type: 3, description: 'coin|slots|poker', required: false }] },
@@ -164,6 +168,9 @@ async function registerSlashCommands() {
 
     // trade
     { name: 'trade', description: 'Trade an item to another user (instant transfer)', options: [{ name: 'user', type: 6, description: 'Recipient', required: true }, { name: 'item', type: 3, description: 'Item id', required: true }] },
+
+    // new: leaderboard
+    { name: 'leaderboard', description: 'Show top balances' },
   ];
 
   const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
@@ -228,8 +235,8 @@ async function handleCommand(command, args, ctx) {
   // - guild optional
   // also ctx._mentionedUser may be set (User)
   try {
-    // Normalize command
     command = (command || '').toLowerCase();
+    console.log(`Executing command: ${command} by ${ctx.author.id}`);
 
     // ---------- HELP ----------
     if (command === 'help') {
@@ -237,11 +244,11 @@ async function handleCommand(command, args, ctx) {
         .setTitle('🤖 Fun GIF Bot Commands')
         .setDescription(
           `**Auto replies:**\n"good morning" → GIF\n"welcome" → GIF\n\n` +
-          `**Fun:**\n${PREFIX}joke, ${PREFIX}meme, ${PREFIX}cat, ${PREFIX}dog, ${PREFIX}8ball, ${PREFIX}coinflip, ${PREFIX}gif <keyword>, ${PREFIX}fact, ${PREFIX}quote\n\n` +
+          `**Fun:**\n${PREFIX}joke, ${PREFIX}meme, ${PREFIX}cat, ${PREFIX}dog, ${PREFIX}8ball <question>, ${PREFIX}coinflip, ${PREFIX}gif <keyword>, ${PREFIX}fact, ${PREFIX}quote\n\n` +
           `**Interactive:**\n${PREFIX}hug @user, ${PREFIX}slap @user, ${PREFIX}highfive @user, ${PREFIX}touch @user, ${PREFIX}roll, ${PREFIX}pick option1 | option2\n\n` +
           `**Utility:**\n${PREFIX}ping, ${PREFIX}serverinfo, ${PREFIX}userinfo @user, ${PREFIX}avatar @user\n\n` +
           `**Steal:**\n${PREFIX}stealemoji <emoji_id or url or <:name:id>>\n${PREFIX}stealsticker <sticker_id or url>\n\n` +
-          `**Currency:**\n${PREFIX}balance, ${PREFIX}daily, ${PREFIX}pay <@user> <amount>, ${PREFIX}gamble <amount> [coin|slots|poker], ${PREFIX}shop, ${PREFIX}buy <item>, ${PREFIX}inventory, ${PREFIX}trade <@user> <item>\n\n` +
+          `**Currency:**\n${PREFIX}balance [@user], ${PREFIX}daily, ${PREFIX}pay <@user> <amount>, ${PREFIX}gamble <amount> [coin|slots|poker], ${PREFIX}shop, ${PREFIX}buy <item>, ${PREFIX}use <item>, ${PREFIX}inventory, ${PREFIX}trade <@user> <item>, ${PREFIX}leaderboard\n\n` +
           `**Owner:** givemoney, takemoney`
         )
         .setColor('Random');
@@ -276,8 +283,11 @@ async function handleCommand(command, args, ctx) {
 
     // ---------- 8BALL ----------
     if (command === '8ball') {
+      const question = args.join(' ');
+      if (!question) return ctx.send('Please ask a question.');
       const answers = ['Yes', 'No', 'Maybe', 'Definitely', 'Absolutely not', 'Ask again later'];
-      return ctx.send(answers[Math.floor(Math.random() * answers.length)]);
+      const answer = answers[Math.floor(Math.random() * answers.length)];
+      return ctx.send(`Question: ${question}\nAnswer: ${answer}`);
     }
 
     // ---------- COINFLIP ----------
@@ -313,14 +323,14 @@ async function handleCommand(command, args, ctx) {
 
     // ---------- HUG / SLAP / HIGHFIVE / TOUCH ----------
     if (['hug', 'slap', 'highfive', 'touch'].includes(command)) {
-      // Determine target:
       let user = null;
-      if (ctx._mentionedUser) user = ctx._mentionedUser; // message mention or attached by interaction
+      if (ctx._mentionedUser) user = ctx._mentionedUser;
       else if (args && args[0]) {
         const maybeId = args[0].replace(/[^0-9]/g, '');
         if (ctx.guild && ctx.guild.members.cache.has(maybeId)) user = ctx.guild.members.cache.get(maybeId).user;
       }
       if (!user) return ctx.send('Please mention a user!');
+      if (user.id === ctx.author.id) return ctx.send(`You can't ${command} yourself!`);
       const gif = await getTenorGif(command) || null;
       const embed = new EmbedBuilder().setTitle(`${ctx.author.username} ${command}s ${user.username}!`);
       if (gif) embed.setImage(gif);
@@ -354,12 +364,13 @@ async function handleCommand(command, args, ctx) {
 
     // ---------- USER INFO ----------
     if (command === 'userinfo') {
-      let user = null;
+      let user = ctx.author;
       if (args.length && ctx.guild) {
         const id = args[0].replace(/[^0-9]/g, '');
-        user = ctx.guild.members.cache.get(id)?.user || null;
+        const member = ctx.guild.members.cache.get(id);
+        if (member) user = member.user;
+        else return ctx.send('User not found in this server.');
       }
-      if (!user) user = ctx.author;
       const embed = new EmbedBuilder()
         .setTitle(user.tag)
         .setDescription(`ID: ${user.id}`)
@@ -370,47 +381,55 @@ async function handleCommand(command, args, ctx) {
 
     // ---------- AVATAR ----------
     if (command === 'avatar') {
-      let user = null;
+      let user = ctx.author;
       if (args.length && ctx.guild) {
         const id = args[0].replace(/[^0-9]/g, '');
-        user = ctx.guild.members.cache.get(id)?.user || null;
+        const member = ctx.guild.members.cache.get(id);
+        if (member) user = member.user;
+        else return ctx.send('User not found in this server.');
       }
-      if (!user) user = ctx.author;
       return ctx.send(user.displayAvatarURL({ dynamic: true, size: 1024 }));
     }
 
     // ---------- STEAL EMOJI ----------
     if (command === 'stealemoji') {
-      if (!ctx.member || !ctx.member.permissions?.has(PermissionsBitField.Flags.ManageEmojisAndStickers)) {
+      if (!ctx.member || !ctx.member.permissions.has(PermissionsBitField.Flags.ManageEmojisAndStickers)) {
         return ctx.send('You need Manage Emojis & Stickers permission to use this.');
       }
       const emojiInput = args[0];
       if (!emojiInput) return ctx.send('Provide emoji (paste <:name:id>, id, or URL).');
 
       // parse
-      let idMatch = emojiInput.match(/<a?:\w+:(\d+)>/);
+      let idMatch = emojiInput.match(/<a?:(\w+):(\d+)>/);
       let url = null;
-      let name = `emoji_${Date.now()}`;
+      let name = idMatch ? idMatch[1] : `emoji_${Date.now()}`;
+      let ext = '.png';
+      if (emojiInput.startsWith('<a:')) ext = '.gif'; // animated
       if (emojiInput.startsWith('http')) url = emojiInput;
-      else if (idMatch) url = `https://cdn.discordapp.com/emojis/${idMatch[1]}.png`;
-      else if (/^\d+$/.test(emojiInput)) url = `https://cdn.discordapp.com/emojis/${emojiInput}.png`;
-      else {
-        // attempt direct image URL fallback
-        url = emojiInput;
-      }
+      else if (idMatch) url = `https://cdn.discordapp.com/emojis/${idMatch[2]}${ext}`;
+      else if (/^\d+$/.test(emojiInput)) url = `https://cdn.discordapp.com/emojis/${emojiInput}${ext}`;
+      else url = emojiInput; // fallback
 
       try {
         const created = await ctx.guild.emojis.create({ attachment: url, name });
         return ctx.send(`Emoji added: ${created}`);
       } catch (err) {
         console.error('Add emoji failed', err);
-        return ctx.send(`Failed to add emoji: ${err?.message || err}`);
+        // Try fallback ext if failed
+        const altExt = ext === '.png' ? '.gif' : '.png';
+        try {
+          url = url.replace(ext, altExt);
+          const created = await ctx.guild.emojis.create({ attachment: url, name });
+          return ctx.send(`Emoji added (fallback format): ${created}`);
+        } catch (fallbackErr) {
+          return ctx.send(`Failed to add emoji: ${err?.message || err}`);
+        }
       }
     }
 
     // ---------- STEAL STICKER ----------
     if (command === 'stealsticker') {
-      if (!ctx.member || !ctx.member.permissions?.has(PermissionsBitField.Flags.ManageEmojisAndStickers)) {
+      if (!ctx.member || !ctx.member.permissions.has(PermissionsBitField.Flags.ManageEmojisAndStickers)) {
         return ctx.send('You need Manage Emojis & Stickers permission to use this.');
       }
       const stickerInput = args[0];
@@ -425,8 +444,20 @@ async function handleCommand(command, args, ctx) {
         });
         return ctx.send(`Sticker added: ${sticker.name}`);
       } catch (err) {
-        console.error('Add sticker failed', err);
-        return ctx.send(`Failed to add sticker: ${err?.message || err}`);
+        // Fallback to .gif for animated stickers
+        url = url.replace('.png', '.gif');
+        try {
+          const sticker = await ctx.guild.stickers.create({
+            file: url,
+            name: `sticker_${Date.now()}`,
+            description: 'Imported sticker',
+            tags: 'fun',
+          });
+          return ctx.send(`Sticker added (fallback format): ${sticker.name}`);
+        } catch (fallbackErr) {
+          console.error('Add sticker failed', err);
+          return ctx.send(`Failed to add sticker: ${err?.message || err}`);
+        }
       }
     }
 
@@ -435,10 +466,8 @@ async function handleCommand(command, args, ctx) {
     // BALANCE
     if (command === 'balance') {
       let id = args[0] ? args[0].replace(/[^0-9]/g, '') : ctx.author.id;
-      // if args[0] is mention like <@id>
-      if (!id) id = ctx.author.id;
+      if (!id || !data.users[id]) return ctx.send('User not found or has no balance.');
       const u = ensureUser(id);
-      saveData(data);
       const embed = new EmbedBuilder().setTitle('Balance').setDescription(`<@${id}> has **${u.balance}** coins`).setColor('Gold');
       return ctx.send({ embeds: [embed] });
     }
@@ -457,7 +486,7 @@ async function handleCommand(command, args, ctx) {
       u.balance += amount;
       u.lastDaily = now;
       saveData(data);
-      return ctx.send(`You claimed your daily **${amount}** coins!`);
+      return ctx.send(`You claimed your daily **${amount}** coins! New balance: **${u.balance}**`);
     }
 
     // PAY / SEND
@@ -493,9 +522,9 @@ async function handleCommand(command, args, ctx) {
 
     // BUY
     if (command === 'buy') {
-      const itemId = args[0];
+      const itemId = args[0]?.toLowerCase();
       if (!itemId) return ctx.send('Usage: buy <item_id>');
-      const item = SHOP.find(s => s.id.toLowerCase() === itemId.toLowerCase());
+      const item = SHOP.find(s => s.id.toLowerCase() === itemId);
       if (!item) return ctx.send('Item not found.');
       const u = ensureUser(ctx.author.id);
       if (u.balance < item.price) return ctx.send("You don't have enough coins.");
@@ -503,18 +532,29 @@ async function handleCommand(command, args, ctx) {
       u.inventory = u.inventory || [];
       u.inventory.push(item.id);
       saveData(data);
-      return ctx.send(`You bought **${item.name}** for **${item.price}** coins.`);
+      return ctx.send(`You bought **${item.name}** for **${item.price}** coins. New balance: **${u.balance}**`);
+    }
+
+    // USE (stub for now)
+    if (command === 'use') {
+      const itemId = args[0]?.toLowerCase();
+      if (!itemId) return ctx.send('Usage: use <item_id>');
+      const u = ensureUser(ctx.author.id);
+      if (!u.inventory || !u.inventory.includes(itemId)) return ctx.send("You don't own that item.");
+      // Remove from inventory (optional, depending on if consumable)
+      u.inventory = u.inventory.filter(i => i !== itemId);
+      saveData(data);
+      return ctx.send(`You used **${itemId}**! (Mock action: Perk applied)`);
     }
 
     // TRADE (immediate transfer)
     if (command === 'trade') {
       const targetId = (args[0] || '').replace(/[^0-9]/g, '');
-      const itemId = args[1];
+      const itemId = args[1]?.toLowerCase();
       if (!targetId || !itemId) return ctx.send('Usage: trade <@user> <item_id>');
       const me = ensureUser(ctx.author.id);
       const you = ensureUser(targetId);
       if (!me.inventory || !me.inventory.includes(itemId)) return ctx.send("You don't own that item.");
-      // remove from sender
       me.inventory = me.inventory.filter(i => i !== itemId);
       you.inventory = you.inventory || [];
       you.inventory.push(itemId);
@@ -522,23 +562,43 @@ async function handleCommand(command, args, ctx) {
       return ctx.send(`Transferred **${itemId}** to <@${targetId}>.`);
     }
 
+    // LEADERBOARD (new)
+    if (command === 'leaderboard' || command === 'lb') {
+      const users = Object.entries(data.users)
+        .sort((a, b) => b[1].balance - a[1].balance)
+        .slice(0, 5);
+      if (!users.length) return ctx.send('No users with balances yet.');
+      const embed = new EmbedBuilder().setTitle('Leaderboard (Top 5)').setColor('Green');
+      embed.setDescription(users.map(([id, u], idx) => `${idx + 1}. <@${id}>: **${u.balance}** coins`).join('\n'));
+      return ctx.send({ embeds: [embed] });
+    }
+
     // GAMBLE
     if (command === 'gamble' || command === 'bet') {
+      const uid = ctx.author.id;
+      const now = Date.now();
+      if (cooldowns.has(uid) && now - cooldowns.get(uid) < COOLDOWN_TIME) {
+        const left = Math.ceil((COOLDOWN_TIME - (now - cooldowns.get(uid))) / 1000);
+        return ctx.send(`Cooldown! Wait ${left} seconds before gambling again.`);
+      }
+      cooldowns.set(uid, now);
+
       let amt = parseInt(args[0], 10);
       const type = (args[1] || 'coin').toLowerCase();
       if (!amt || amt <= 0) return ctx.send('Usage: gamble <amount> [coin|slots|poker]');
-      const u = ensureUser(ctx.author.id);
+      const u = ensureUser(uid);
       if (amt > u.balance) return ctx.send("You don't have enough coins.");
+      u.balance -= amt; // always subtract bet first
 
       // COIN
       if (type === 'coin' || type === 'coinflip') {
         const win = Math.random() < 0.5;
         if (win) {
-          u.balance += amt;
+          const payout = amt * 2; // return 2x (net +amt profit)
+          u.balance += payout;
           saveData(data);
-          return ctx.send(`You won! You gained **${amt}** coins. New balance: **${u.balance}**`);
+          return ctx.send(`You won! Gained **${payout - amt}** profit. New balance: **${u.balance}**`);
         } else {
-          u.balance -= amt;
           saveData(data);
           return ctx.send(`You lost **${amt}** coins. New balance: **${u.balance}**`);
         }
@@ -550,17 +610,17 @@ async function handleCommand(command, args, ctx) {
         const s1 = symbols[Math.floor(Math.random()*symbols.length)];
         const s2 = symbols[Math.floor(Math.random()*symbols.length)];
         const s3 = symbols[Math.floor(Math.random()*symbols.length)];
-        let payout = 0;
-        if (s1 === s2 && s2 === s3) payout = amt * 5;
-        else if (s1 === s2 || s2 === s3 || s1 === s3) payout = amt * 2;
+        let multiplier = 0;
+        if (s1 === s2 && s2 === s3) multiplier = 6; // big win: 6x return (net +5x profit)
+        else if (s1 === s2 || s2 === s3 || s1 === s3) multiplier = 3; // pair: 3x (net +2x)
+        const payout = amt * multiplier;
         if (payout > 0) {
           u.balance += payout;
           saveData(data);
-          return ctx.send(`Slots result: ${s1} ${s2} ${s3}\n🎉 You won **${payout}** coins! New balance: **${u.balance}**`);
+          return ctx.send(`Slots: ${s1} ${s2} ${s3}\n🎉 Won **${payout - amt}** profit! New balance: **${u.balance}**`);
         } else {
-          u.balance -= amt;
           saveData(data);
-          return ctx.send(`Slots result: ${s1} ${s2} ${s3}\n😢 You lost **${amt}** coins. New balance: **${u.balance}**`);
+          return ctx.send(`Slots: ${s1} ${s2} ${s3}\n😢 Lost **${amt}**. New balance: **${u.balance}**`);
         }
       }
 
@@ -568,19 +628,17 @@ async function handleCommand(command, args, ctx) {
       if (type === 'poker') {
         const hand = drawHand();
         const evalRes = evaluateHand(hand);
-        // If multiplier 0 => lose
-        if (evalRes.multiplier > 0) {
-          const gain = Math.floor(amt * evalRes.multiplier);
-          u.balance += gain;
+        const rankMap = {11: 'J', 12: 'Q', 13: 'K', 14: 'A'};
+        const handStr = hand.map(c => `${rankMap[c.r] || c.r}${c.s}`).join(' ');
+        const multiplier = evalRes.multiplier;
+        const payout = Math.floor(amt * multiplier);
+        if (multiplier > 0) {
+          u.balance += payout;
           saveData(data);
-          // format hand nicely
-          const handStr = hand.map(c => `${c.r}${c.s}`).join(' ');
-          return ctx.send(`Your poker hand: ${handStr}\n${evalRes.name} — You won **${gain}** coins! New balance: **${u.balance}**`);
+          return ctx.send(`Hand: ${handStr}\n${evalRes.name} — Won **${payout - amt}** profit! New balance: **${u.balance}**`);
         } else {
-          u.balance -= amt;
           saveData(data);
-          const handStr = hand.map(c => `${c.r}${c.s}`).join(' ');
-          return ctx.send(`Your poker hand: ${handStr}\n${evalRes.name} — You lost **${amt}** coins. New balance: **${u.balance}**`);
+          return ctx.send(`Hand: ${handStr}\n${evalRes.name} — Lost **${amt}**. New balance: **${u.balance}**`);
         }
       }
 
@@ -588,7 +646,7 @@ async function handleCommand(command, args, ctx) {
     }
 
     // OWNER give/take
-    if (command === 'givemoney' || command === 'givemoney') {
+    if (command === 'givemoney') {
       if (ctx.author.id !== OWNER_ID) return ctx.send('Only the owner can do that.');
       const target = (args[0] || '').replace(/[^0-9]/g, '');
       const amount = parseInt(args[1], 10);
@@ -644,12 +702,11 @@ client.on('messageCreate', async message => {
   // Build ctx for message
   const ctx = {
     send: c => message.channel.send(c),
-    reply: c => message.reply(c),
     author: message.author,
     member: message.member,
     guild: message.guild,
     channel: message.channel,
-    _mentionedUser: message.mentions?.users?.first?.() || null,
+    _mentionedUser: message.mentions?.users?.first() || null,
     _msgCreatedAt: message.createdTimestamp
   };
 
@@ -683,9 +740,6 @@ client.on('interactionCreate', async interaction => {
       } catch (err) {
         console.error('Interaction send error', err);
       }
-    },
-    reply: async content => {
-      return ctx.send(content);
     },
     author: interaction.user,
     member: interaction.member,
