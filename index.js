@@ -1,9 +1,7 @@
-// index.js (FULL MERGED)
-// Requirements:
-// - env: DISCORD_TOKEN, TENOR_API_KEY, PORT (optional)
-// - package.json should include node-fetch, discord.js, dotenv, express, axios (axios optional)
-// - A file bank.json will be created for economy persistence
-
+// index.js — full merged bot with prefix + slash commands, Tenor gifs fixed,
+// emoji/sticker stealing, persisted currency (JSON), help, and currency shop.
+// Install: npm i discord.js node-fetch
+// Start: node index.js
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
@@ -16,13 +14,12 @@ const {
   Routes,
   EmbedBuilder,
   PermissionsBitField,
-  Collection
 } = require('discord.js');
 
-const TENOR_API_KEY = process.env.TENOR_API_KEY || '';
+const TENOR_API_KEY = process.env.TENOR_API_KEY;
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 if (!DISCORD_TOKEN) {
-  console.error('DISCORD_TOKEN not set. Exiting.');
+  console.error('DISCORD_TOKEN missing in environment!');
   process.exit(1);
 }
 
@@ -37,84 +34,75 @@ const client = new Client({
 });
 
 const PREFIX = ']';
+const DATA_FILE = path.join(__dirname, 'balances.json');
 
-// ----- Keep-alive / basic web server (for Render / Replit / UptimeRobot) -----
+// -------------------- Persistence helpers --------------------
+function loadData() {
+  try {
+    if (!fs.existsSync(DATA_FILE)) {
+      fs.writeFileSync(DATA_FILE, JSON.stringify({ users: {} }, null, 2));
+    }
+    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+  } catch (err) {
+    console.error('Failed to load data file:', err);
+    return { users: {} };
+  }
+}
+function saveData(data) {
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+  } catch (err) {
+    console.error('Failed to save data file:', err);
+  }
+}
+const data = loadData();
+function ensureUser(id) {
+  if (!data.users[id]) data.users[id] = { balance: 0, lastDaily: 0 };
+  return data.users[id];
+}
+
+// -------------------- Keep-alive (for Render, Replit, etc.) --------------------
 const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.get('/', (req, res) => res.send('Discord Bot is alive!'));
 app.listen(PORT, () => console.log(`Keep-alive server running on port ${PORT}`));
 
-// ----- Economy simple DB (file-based) -----
-const BANK_FILE = path.join(__dirname, 'bank.json');
-let bank = {};
-try {
-  if (fs.existsSync(BANK_FILE)) {
-    bank = JSON.parse(fs.readFileSync(BANK_FILE, 'utf8') || '{}');
-  } else {
-    bank = {};
-  }
-} catch (e) {
-  console.error('Failed to load bank.json:', e);
-  bank = {};
-}
-function saveBank() {
-  try {
-    fs.writeFileSync(BANK_FILE, JSON.stringify(bank, null, 2));
-  } catch (e) {
-    console.error('Failed to save bank.json:', e);
-  }
-}
-function ensureAccount(id) {
-  if (!bank[id]) {
-    bank[id] = { balance: 200 }; // starter money
-    saveBank();
-  }
-}
-function addMoney(id, amount) {
-  ensureAccount(id);
-  bank[id].balance = (bank[id].balance || 0) + amount;
-  saveBank();
-}
-function removeMoney(id, amount) {
-  ensureAccount(id);
-  bank[id].balance = Math.max(0, (bank[id].balance || 0) - amount);
-  saveBank();
-}
-function getBalance(id) {
-  ensureAccount(id);
-  return bank[id].balance || 0;
-}
-
-// ----- Slash command registration -----
+// -------------------- Slash command registration --------------------
 async function registerSlashCommands() {
   const commands = [
+    { name: 'help', description: 'Show all commands and usage' },
     { name: 'joke', description: 'Get a random joke' },
-    { name: 'meme', description: 'Get a random meme' },
-    { name: 'cat', description: 'Get a random cat gif' },
-    { name: 'dog', description: 'Get a random dog gif' },
-    { name: '8ball', description: 'Ask the magic 8ball', options: [{ name: 'question', type: 3, description: 'Your question', required: true }] },
+    { name: 'meme', description: 'Get a random meme (Tenor)' },
+    { name: 'cat', description: 'Get a random cat gif (Tenor)' },
+    { name: 'dog', description: 'Get a random dog gif (Tenor)' },
+    {
+      name: '8ball',
+      description: 'Ask the magic 8ball',
+      options: [{ name: 'question', type: 3, description: 'Your question', required: true }],
+    },
     { name: 'coinflip', description: 'Flip a coin' },
-    { name: 'gif', description: 'Search a gif', options: [{ name: 'keyword', type: 3, description: 'Keyword to search', required: true }] },
+    { name: 'gif', description: 'Search a gif (Tenor)', options: [{ name: 'keyword', type: 3, required: true }] },
     { name: 'fact', description: 'Get a random fact' },
     { name: 'quote', description: 'Get a random quote' },
-    { name: 'hug', description: 'Hug a user', options: [{ name: 'user', type: 6, description: 'User to hug', required: true }] },
-    { name: 'slap', description: 'Slap a user', options: [{ name: 'user', type: 6, description: 'User to slap', required: true }] },
-    { name: 'highfive', description: 'Highfive a user', options: [{ name: 'user', type: 6, description: 'User to highfive', required: true }] },
-    { name: 'touch', description: 'Touch a user', options: [{ name: 'user', type: 6, description: 'User to touch', required: true }] },
+    { name: 'hug', description: 'Hug a user', options: [{ name: 'user', type: 6, required: true }] },
+    { name: 'slap', description: 'Slap a user', options: [{ name: 'user', type: 6, required: true }] },
+    { name: 'highfive', description: 'Highfive a user', options: [{ name: 'user', type: 6, required: true }] },
+    { name: 'touch', description: 'Touch a user', options: [{ name: 'user', type: 6, required: true }] },
     { name: 'roll', description: 'Roll a dice' },
-    { name: 'pick', description: 'Pick an option', options: [{ name: 'options', type: 3, description: 'Options separated by |', required: true }] },
+    { name: 'pick', description: 'Pick an option', options: [{ name: 'options', type: 3, required: true }] },
     { name: 'ping', description: 'Check bot latency' },
     { name: 'serverinfo', description: 'Get server info' },
-    { name: 'userinfo', description: 'Get user info', options: [{ name: 'user', type: 6, description: 'User', required: false }] },
-    { name: 'avatar', description: 'Get user avatar', options: [{ name: 'user', type: 6, description: 'User', required: false }] },
-    { name: 'stealemoji', description: 'Steal emoji from another server (URL or ID)', options: [{ name: 'emoji', type: 3, description: 'Emoji ID or URL', required: true }] },
-    { name: 'stealsticker', description: 'Steal sticker from another server (URL or ID)', options: [{ name: 'sticker', type: 3, description: 'Sticker ID or URL', required: true }] },
-    { name: 'help', description: 'Show all commands and usage' },
-    { name: 'balance', description: 'Show your balance' },
-    { name: 'gamble', description: 'Gamble some coins', options: [{ name: 'amount', type: 4, description: 'Amount to gamble', required: true }] },
-    { name: 'shop', description: 'Show shop items' },
-    { name: 'buy', description: 'Buy a shop item', options: [{ name: 'item', type: 3, description: 'Item id', required: true }] },
+    { name: 'userinfo', description: 'Get user info', options: [{ name: 'user', type: 6, required: false }] },
+    { name: 'avatar', description: 'Get user avatar', options: [{ name: 'user', type: 6, required: false }] },
+    { name: 'stealemoji', description: 'Steal emoji from another server', options: [{ name: 'emoji', type: 3, required: true }] },
+    { name: 'stealsticker', description: 'Steal sticker from another server', options: [{ name: 'sticker', type: 3, required: true }] },
+    // Currency commands
+    { name: 'balance', description: 'Check your balance (or someone else)', options: [{ name: 'user', type: 6, required: false }] },
+    { name: 'daily', description: 'Claim daily reward' },
+    { name: 'gamble', description: 'Gamble some of your money', options: [{ name: 'amount', type: 3, required: true }] },
+    { name: 'shop', description: 'Show the shop' },
+    { name: 'buy', description: 'Buy an item from the shop', options: [{ name: 'item', type: 3, required: true }] },
   ];
 
   const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
@@ -122,64 +110,64 @@ async function registerSlashCommands() {
     console.log('Refreshing application (/) commands...');
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
     console.log('Slash commands registered!');
-  } catch (error) {
-    console.error('Error registering slash commands:', error);
+  } catch (err) {
+    console.error('Failed to register slash commands:', err);
   }
 }
 
-// ----- Tenor helper (robust) -----
+// -------------------- Tenor helper (robust) --------------------
 async function getTenorGif(keyword) {
+  if (!TENOR_API_KEY) return null;
   try {
-    if (!TENOR_API_KEY) return null;
-    const url = `https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(keyword)}&key=${TENOR_API_KEY}&limit=24&random=true`;
-    const res = await fetch(url, { timeout: 10000 });
-    const data = await res.json();
-    if (!data) return null;
-    // try a few shapes
-    const results = data.results || data.items || [];
-    if (!results.length) return null;
-    const pick = results[Math.floor(Math.random() * results.length)];
-    // common v2 shape: pick.media_formats.gif.url
-    if (pick.media_formats && pick.media_formats.gif && pick.media_formats.gif.url) return pick.media_formats.gif.url;
-    // older shapes:
-    if (pick.media && pick.media[0] && pick.media[0].gif && pick.media[0].gif.url) return pick.media[0].gif.url;
-    if (pick.url) return pick.url;
-    // try finding any .gif or .mp4 in pick object
-    const asString = JSON.stringify(pick);
-    const m = asString.match(/https?:\/\/[^"\s]*\.(?:gif|mp4|webp)/i);
-    if (m) return m[0];
+    const res = await fetch(`https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(keyword)}&key=${TENOR_API_KEY}&limit=20`);
+    const json = await res.json();
+    if (!json || !json.results || json.results.length === 0) return null;
+    const pick = json.results[Math.floor(Math.random() * json.results.length)];
+    // media_formats may vary, try common paths
+    if (pick?.media_formats?.gif?.url) return pick.media_formats.gif.url;
+    if (pick?.media_formats?.mediumgif?.url) return pick.media_formats.mediumgif.url;
+    if (pick?.content_description && pick?.url) return pick.url;
+    // fallback: try first media object url
+    const mf = Object.values(pick?.media_formats || {})[0];
+    if (mf?.url) return mf.url;
     return null;
   } catch (err) {
-    console.error('Tenor API error:', err && err.message ? err.message : err);
+    console.error('Tenor error:', err);
     return null;
   }
 }
 
-// ----- Utility: download to buffer -----
-async function downloadToBuffer(url) {
-  try {
-    const r = await fetch(url, { timeout: 15000 });
-    if (!r.ok) throw new Error(`Download failed: ${r.status}`);
-    const buf = await r.buffer();
-    return buf;
-  } catch (err) {
-    throw err;
-  }
+// -------------------- Utility: make embed senders --------------------
+function makeContextForMessage(message) {
+  return {
+    send: content => message.channel.send(content),
+    reply: content => message.reply(content),
+    author: message.author,
+    guild: message.guild,
+    member: message.member,
+  };
+}
+function makeContextForInteraction(interaction) {
+  // We'll reply immediately; if later we need to update we can followup.
+  return {
+    send: content => interaction.reply(typeof content === 'string' ? { content } : content),
+    reply: content => interaction.reply(typeof content === 'string' ? { content } : content),
+    author: interaction.user,
+    guild: interaction.guild,
+    member: interaction.member,
+  };
 }
 
-// ----- Shop data -----
+// -------------------- Shop (simple) --------------------
 const SHOP = [
-  { id: 'vip', name: 'VIP Role (demo)', price: 1000, desc: 'A demo VIP (you must manually add role).' },
-  { id: 'color', name: 'Color Change (demo)', price: 500, desc: 'A demo color perk (manual).' }
+  { id: 'rolecolor', name: 'Role Color Change (mock)', price: 100 },
+  { id: 'nickname', name: 'Nickname Change (mock)', price: 50 },
+  { id: 'customemoji', name: 'Custom Emoji Slot (mock)', price: 200 },
 ];
 
-// ----- Core command handler (used by prefix and by slash wrapper) -----
-async function handleCommand(context, command, args) {
-  // context: { author, channel, guild, member, replyFn, sendFn }
-  // sendFn(content/obj) and replyFn(content/obj) must be functions returning Promises
-  const send = context.sendFn;
-  const reply = context.replyFn || send;
-
+// -------------------- Command implementation (single shared) --------------------
+async function handleCommand(command, args, ctx) {
+  // ctx.send / ctx.reply available
   try {
     switch (command) {
       case 'help': {
@@ -187,71 +175,68 @@ async function handleCommand(context, command, args) {
           .setTitle('🤖 Fun GIF Bot Commands')
           .setDescription(
             `**Auto replies:**\n"good morning" → GIF\n"welcome" → GIF\n\n` +
-            `**Fun:**\n]joke, ]meme, ]cat, ]dog, ]8ball, ]coinflip, ]gif <keyword>, ]fact, ]quote\n\n` +
-            `**Interactive:**\n]hug @user, ]slap @user, ]highfive @user, ]touch @user, ]roll, ]pick option1 | option2\n\n` +
-            `**Utility:**\n]ping, ]serverinfo, ]userinfo @user, ]avatar @user\n\n` +
-            `**Steal:**\n]stealemoji <emoji_id|url>\n]stealsticker <sticker_id|url>\n\n` +
-            `**Economy:**\n]balance, ]gamble <amount>, ]shop, ]buy <item>\n\nEnjoy! 🎉`
+              `**Fun:**\n${PREFIX}joke, ${PREFIX}meme, ${PREFIX}cat, ${PREFIX}dog, ${PREFIX}8ball, ${PREFIX}coinflip, ${PREFIX}gif <keyword>, ${PREFIX}fact, ${PREFIX}quote\n\n` +
+              `**Interactive:**\n${PREFIX}hug @user, ${PREFIX}slap @user, ${PREFIX}highfive @user, ${PREFIX}touch @user, ${PREFIX}roll, ${PREFIX}pick option1 | option2\n\n` +
+              `**Utility:**\n${PREFIX}ping, ${PREFIX}serverinfo, ${PREFIX}userinfo @user, ${PREFIX}avatar @user\n\n` +
+              `**Steal:**\n${PREFIX}stealemoji <emoji_id or url>\n${PREFIX}stealsticker <sticker_id or url>\n\n` +
+              `**Currency:**\n${PREFIX}balance, ${PREFIX}daily, ${PREFIX}gamble <amount>, ${PREFIX}shop, ${PREFIX}buy <item>\n\nEnjoy! 🎉`
           )
           .setColor('Blue');
-        return send({ embeds: [embed] });
+        return ctx.send({ embeds: [embed] });
       }
 
       case 'ping':
-        return send(`🏓 Pong! Latency: ${Date.now() - context.messageTimestamp}ms`);
+        return ctx.send(`🏓 Pong! Latency: ${Date.now() - (ctx.author ? ctx.author.createdAt?.getTime() || 0 : 0)}ms`);
 
       case 'joke': {
         const r = await fetch('https://v2.jokeapi.dev/joke/Any');
         const d = await r.json();
-        return send(d.type === 'single' ? d.joke : `${d.setup}\n${d.delivery}`);
+        return ctx.send(d.type === 'single' ? d.joke : `${d.setup}\n${d.delivery}`);
       }
 
       case 'meme': {
-        // meme via Tenor search "meme"
-        const url = await getTenorGif('meme') || 'https://i.imgur.com/AI6X9bT.jpg';
-        const embed = new EmbedBuilder().setImage(url).setFooter({ text: 'Random meme (Tenor)' });
-        return send({ embeds: [embed] });
+        const url = await getTenorGif('meme');
+        return ctx.send(url || 'No meme GIF found 😢');
       }
 
       case 'cat': {
-        const url = await getTenorGif('cat') || 'https://i.imgur.com/J5qZb.gif';
-        return send({ embeds: [new EmbedBuilder().setImage(url).setFooter({ text: 'Random cat (Tenor)' })] });
+        const url = await getTenorGif('cat');
+        return ctx.send(url || 'No cat GIF found 😢');
       }
 
       case 'dog': {
-        const url = await getTenorGif('dog') || 'https://i.imgur.com/8pQGQ.gif';
-        return send({ embeds: [new EmbedBuilder().setImage(url).setFooter({ text: 'Random dog (Tenor)' })] });
+        const url = await getTenorGif('dog');
+        return ctx.send(url || 'No dog GIF found 😢');
       }
 
       case '8ball': {
-        const answers = ['Yes', 'No', 'Maybe', 'Definitely', 'Absolutely not', 'Ask again later'];
-        return send(answers[Math.floor(Math.random() * answers.length)]);
+        const answers = ['Yes', 'No', 'Maybe', 'Definitely', 'Absolutely not', 'Ask again later', 'I don’t know'];
+        return ctx.send(answers[Math.floor(Math.random() * answers.length)]);
       }
 
       case 'coinflip':
-        return send(Math.random() < 0.5 ? 'Heads 🪙' : 'Tails 🪙');
+        return ctx.send(Math.random() < 0.5 ? 'Heads 🪙' : 'Tails 🪙');
 
       case 'gif': {
-        const keyword = args.join(' ').trim();
-        if (!keyword) return send('Please provide a keyword.');
+        const keyword = args.join(' ');
+        if (!keyword) return ctx.send('Please provide a keyword.');
         const url = await getTenorGif(keyword);
-        if (!url) return send('No GIF found 😢');
-        return send({ embeds: [new EmbedBuilder().setImage(url).setFooter({ text: `GIF for "${keyword}"` })] });
+        return ctx.send(url || 'No GIF found 😢');
       }
 
       case 'fact': {
         const r = await fetch('https://uselessfacts.jsph.pl/random.json?language=en');
         const d = await r.json();
-        return send(d.text || 'No fact found.');
+        return ctx.send(d.text || 'No fact found.');
       }
 
       case 'quote': {
         try {
           const r = await fetch('https://api.quotable.io/random');
           const d = await r.json();
-          return send(`"${d.content}" — ${d.author}`);
+          return ctx.send(`"${d.content}" — ${d.author}`);
         } catch {
-          return send('Something went wrong fetching a quote 😢');
+          return ctx.send('Something went wrong fetching a quote 😢');
         }
       }
 
@@ -259,284 +244,272 @@ async function handleCommand(context, command, args) {
       case 'slap':
       case 'highfive':
       case 'touch': {
-        const target = context.mentions?.first && context.mentions.first() || context.mentionedUser || (args && args[0] && context.guild?.members?.cache?.get(args[0]));
-        // fallback: try args first as raw id
-        let user = null;
-        if (context.mentions && typeof context.mentions.first === 'function') user = context.mentions.first();
-        if (!user && args.length && args[0]) {
-          try { user = await context.guild?.members.fetch(args[0]).then(m=>m.user).catch(()=>null); } catch {}
+        const target = args[0] && typeof args[0] === 'string' && ctx.guild ? (ctx.guild.members.cache.get(args[0]) || null) : null;
+        // When used from message, args parsing uses mentions; when slash, args[0] will be user id
+        let user;
+        if (target) user = target.user;
+        else if (ctx.author && args.length && args[0].startsWith('<@')) {
+          // mention string
+          const id = args[0].replace(/[^0-9]/g, '');
+          user = ctx.guild?.members.cache.get(id)?.user || null;
+        } else {
+          // fallback: in message handler we will pass message.mentions
+          user = ctx._mentionedUser || null;
         }
-        if (!user) return send('Please mention a user!');
+        if (!user) return ctx.send('Please mention a user!');
         const gif = await getTenorGif(command) || null;
-        const embed = new EmbedBuilder().setTitle(`${context.author.username} ${command}s ${user.username}!`).setColor('Random');
+        const embed = new EmbedBuilder().setTitle(`${ctx.author.username} ${command}s ${user.username}!`);
         if (gif) embed.setImage(gif);
-        return send({ embeds: [embed] });
+        embed.setColor('Random');
+        return ctx.send({ embeds: [embed] });
       }
 
       case 'roll': {
-        const n = Math.floor(Math.random() * 100) + 1;
-        return send(`🎲 You rolled: ${n}`);
+        const roll = Math.floor(Math.random() * 6) + 1;
+        return ctx.send(`🎲 You rolled: ${roll}`);
       }
 
       case 'pick': {
-        const options = args.join(' ').split('|').map(o=>o.trim()).filter(Boolean);
-        if (options.length < 2) return send('Provide at least 2 options separated by |');
+        const options = args.join(' ').split('|').map(s => s.trim()).filter(Boolean);
+        if (options.length < 2) return ctx.send('Provide at least 2 options separated by |');
         const choice = options[Math.floor(Math.random() * options.length)];
-        return send(`I pick: **${choice}**`);
+        return ctx.send(`I pick: **${choice}**`);
       }
 
       case 'serverinfo': {
-        const embed = new EmbedBuilder().setTitle(context.guild.name).setDescription(`ID: ${context.guild.id}\nMembers: ${context.guild.memberCount}`).setColor('Blue');
-        return send({ embeds: [embed] });
+        const g = ctx.guild;
+        if (!g) return ctx.send('Not in a guild context.');
+        const embed = new EmbedBuilder()
+          .setTitle(g.name)
+          .setDescription(`ID: ${g.id}\nMembers: ${g.memberCount}\nRegion: ${g.preferredLocale || 'N/A'}`)
+          .setColor('Green');
+        return ctx.send({ embeds: [embed] });
       }
 
       case 'userinfo': {
+        // args[0] might be user id
         let user = null;
-        if (args.length && args[0]) {
-          try { user = await context.guild.members.fetch(args[0]).then(m=>m.user).catch(()=>null); } catch {}
+        if (args.length && ctx.guild) {
+          const id = args[0].replace(/[^0-9]/g, '');
+          user = ctx.guild.members.cache.get(id)?.user || null;
         }
-        if (!user) user = context.author;
-        const embed = new EmbedBuilder().setTitle(`${user.tag}`).setThumbnail(user.displayAvatarURL({ dynamic: true })).addFields(
-          { name: 'ID', value: user.id, inline: true }
-        ).setColor('Green');
-        return send({ embeds: [embed] });
+        if (!user) user = ctx.author;
+        const embed = new EmbedBuilder()
+          .setTitle(user.tag)
+          .addFields({ name: 'ID', value: user.id, inline: true })
+          .setThumbnail(user.displayAvatarURL({ dynamic: true }))
+          .setColor('Blue');
+        return ctx.send({ embeds: [embed] });
       }
 
       case 'avatar': {
         let user = null;
-        if (args.length && args[0]) {
-          try { user = await context.guild.members.fetch(args[0]).then(m=>m.user).catch(()=>null); } catch {}
+        if (args.length && ctx.guild) {
+          const id = args[0].replace(/[^0-9]/g, '');
+          user = ctx.guild.members.cache.get(id)?.user || null;
         }
-        if (!user) user = context.author;
-        return send({ content: `${user.username}'s Avatar:`, files: [user.displayAvatarURL({ dynamic: true, size: 1024 })] });
+        if (!user) user = ctx.author;
+        return ctx.send(user.displayAvatarURL({ dynamic: true, size: 1024 }));
       }
 
       case 'stealemoji': {
-        if (!context.member?.permissions?.has?.(PermissionsBitField.Flags.ManageEmojisAndStickers)) {
-          return send('You need Manage Emojis & Stickers permission to use this.');
-        }
+        if (!ctx.member || !ctx.member.permissions?.has(PermissionsBitField.Flags.ManageEmojisAndStickers))
+          return ctx.send('You need Manage Emojis & Stickers permission to use this.');
         const emojiInput = args[0];
-        if (!emojiInput) return send('Provide an emoji ID or URL.');
-        // Try to form a usable URL or accept direct URL
-        let url = emojiInput;
-        // If input looks like <:name:id> pattern, extract id
-        const customMatch = emojiInput.match(/:(\d+)>$/);
-        if (customMatch) {
-          const id = customMatch[1];
-          url = `https://cdn.discordapp.com/emojis/${id}.png`;
-        } else if (!emojiInput.startsWith('http')) {
-          // maybe they passed raw id
-          url = `https://cdn.discordapp.com/emojis/${emojiInput}.png`;
-        }
+        if (!emojiInput) return ctx.send('Provide an emoji id or direct URL.');
+        // If user pasted <:name:id> extract id
+        const idMatch = emojiInput.match(/:(\d+)>?$/);
+        let url = null;
+        if (emojiInput.startsWith('http')) url = emojiInput;
+        else if (idMatch) url = `https://cdn.discordapp.com/emojis/${idMatch[1]}.png`;
+        else if (/^\d+$/.test(emojiInput)) url = `https://cdn.discordapp.com/emojis/${emojiInput}.png`;
+        else return ctx.send('Unrecognized emoji input. Paste emoji (like <:name:id>) or an emoji id or a URL.');
+
         try {
-          const buf = await downloadToBuffer(url);
-          // if buffer is tiny, maybe the url is gif; still okay
-          const emoji = await context.guild.emojis.create({ attachment: buf, name: `emoji_${Date.now()}` });
-          return send(`Emoji added: <:${emoji.name}:${emoji.id}>`);
+          const created = await ctx.guild.emojis.create({ attachment: url, name: `emoji_${Date.now()}` });
+          return ctx.send(`Emoji added: ${created}`);
         } catch (err) {
-          console.error('Failed to add emoji:', err && err.message ? err.message : err);
-          return send(`Failed to add emoji: ${err.message || err}`);
+          console.error('Add emoji failed:', err);
+          return ctx.send(`Failed to add emoji: ${err?.message || err}`);
         }
       }
 
       case 'stealsticker': {
-        if (!context.member?.permissions?.has?.(PermissionsBitField.Flags.ManageEmojisAndStickers)) {
-          return send('You need Manage Emojis & Stickers permission to use this.');
-        }
+        if (!ctx.member || !ctx.member.permissions?.has(PermissionsBitField.Flags.ManageEmojisAndStickers))
+          return ctx.send('You need Manage Emojis & Stickers permission to use this.');
         const stickerInput = args[0];
-        if (!stickerInput) return send('Provide a sticker ID or URL.');
-        let url = stickerInput;
-        // user might pass sticker id -> sticker CDN path (may be webp)
-        if (!stickerInput.startsWith('http')) {
-          url = `https://cdn.discordapp.com/stickers/${stickerInput}.png`;
-        }
+        if (!stickerInput) return ctx.send('Provide a sticker id or URL.');
+        // For stickers, Discord CDN: /stickers/{id}.png (static) or .png? Need to fetch actual URL from guilds if available.
+        let url = stickerInput.startsWith('http') ? stickerInput : `https://cdn.discordapp.com/stickers/${stickerInput}.png`;
         try {
-          const buf = await downloadToBuffer(url);
-          const sticker = await context.guild.stickers.create({
-            file: buf,
+          const sticker = await ctx.guild.stickers.create({
+            file: url,
             name: `sticker_${Date.now()}`,
-            description: 'Added by bot',
-            tags: 'fun'
+            description: 'Imported sticker',
+            tags: 'fun',
           });
-          return send(`Sticker added: ${sticker.name}`);
+          return ctx.send(`Sticker added: ${sticker.name}`);
         } catch (err) {
-          console.error('Failed to add sticker:', err && err.message ? err.message : err);
-          return send(`Failed to add sticker: ${err.message || err}`);
+          console.error('Add sticker failed:', err);
+          return ctx.send(`Failed to add sticker: ${err?.message || err}`);
         }
       }
 
-      // ----- Economy
+      // ---------------- Currency commands ----------------
       case 'balance': {
-        const bal = getBalance(context.author.id);
-        return send(`${context.author.username}, your balance: **${bal}** coins`);
+        const targetId = args[0] ? args[0].replace(/[^0-9]/g, '') : ctx.author.id;
+        const userData = ensureUser(targetId);
+        saveData(data);
+        const embed = new EmbedBuilder()
+          .setTitle('Balance')
+          .setDescription(`<@${targetId}> has **${userData.balance}** coins`)
+          .setColor('Gold');
+        return ctx.send({ embeds: [embed] });
+      }
+
+      case 'daily': {
+        const uid = ctx.author.id;
+        const userData = ensureUser(uid);
+        const now = Date.now();
+        const oneDay = 24 * 60 * 60 * 1000;
+        if (now - (userData.lastDaily || 0) < oneDay) {
+          const left = Math.ceil((oneDay - (now - userData.lastDaily)) / (60 * 60 * 1000));
+          return ctx.send(`You already claimed daily. Try again in about ${left} hour(s).`);
+        }
+        const amount = 100;
+        userData.balance += amount;
+        userData.lastDaily = now;
+        saveData(data);
+        return ctx.send(`You claimed your daily **${amount}** coins!`);
       }
 
       case 'gamble': {
-        const amount = Number(args[0]);
-        if (!amount || amount <= 0) return send('Usage: ]gamble <amount>');
-        ensureAccount(context.author.id);
-        const bal = getBalance(context.author.id);
-        if (amount > bal) return send('You don\'t have that many coins.');
+        let amt = args[0];
+        if (!amt) return ctx.send('Usage: gamble <amount> (or "all")');
+        const uid = ctx.author.id;
+        const userData = ensureUser(uid);
+        if (amt === 'all') amt = userData.balance;
+        amt = parseInt(amt, 10);
+        if (!amt || amt <= 0) return ctx.send('Provide a valid amount.');
+        if (amt > userData.balance) return ctx.send("You don't have enough coins.");
         const win = Math.random() < 0.5;
         if (win) {
-          addMoney(context.author.id, amount);
-          return send(`You won! You gained **${amount}** coins. New balance: **${getBalance(context.author.id)}**`);
+          userData.balance += amt;
+          saveData(data);
+          return ctx.send(`You won! You gained **${amt}** coins. New balance: **${userData.balance}**`);
         } else {
-          removeMoney(context.author.id, amount);
-          return send(`You lost **${amount}** coins. New balance: **${getBalance(context.author.id)}**`);
+          userData.balance -= amt;
+          saveData(data);
+          return ctx.send(`You lost **${amt}** coins. New balance: **${userData.balance}**`);
         }
       }
 
       case 'shop': {
-        const embed = new EmbedBuilder().setTitle('Shop').setDescription(SHOP.map(i=>`**${i.id}** — ${i.name} — ${i.price} coins\n${i.desc}`).join('\n\n')).setColor('Purple');
-        return send({ embeds: [embed] });
+        const embed = new EmbedBuilder().setTitle('Shop').setColor('Purple');
+        const lines = SHOP.map(i => `**${i.id}** — ${i.name} — ${i.price} coins`);
+        embed.setDescription(lines.join('\n'));
+        return ctx.send({ embeds: [embed] });
       }
 
       case 'buy': {
         const itemId = args[0];
-        if (!itemId) return send('Usage: ]buy <item>');
-        const item = SHOP.find(i=>i.id === itemId);
-        if (!item) return send('Item not found.');
-        const bal2 = getBalance(context.author.id);
-        if (bal2 < item.price) return send(`Not enough coins. ${item.price} needed.`);
-        removeMoney(context.author.id, item.price);
-        // NOTE: actual perks (roles etc.) require server-side config - this is a demo
-        return send(`You bought **${item.name}** for **${item.price}** coins. New balance: **${getBalance(context.author.id)}**`);
+        if (!itemId) return ctx.send('Usage: buy <item_id>');
+        const item = SHOP.find(s => s.id.toLowerCase() === itemId.toLowerCase());
+        if (!item) return ctx.send('Item not found.');
+        const uid = ctx.author.id;
+        const userData = ensureUser(uid);
+        if (userData.balance < item.price) return ctx.send("You don't have enough coins.");
+        userData.balance -= item.price;
+        saveData(data);
+        // NOTE: this example does not actually change server settings (mock perks).
+        return ctx.send(`You bought **${item.name}** for **${item.price}** coins. (This is a mock perk.)`);
       }
 
       default:
-        return send('Unknown command. Use ]help to see available commands.');
+        return ctx.send("Unknown command. Use help to see available commands.");
     }
   } catch (err) {
-    console.error('Command handler error:', err);
-    return send('Oops! Something went wrong 😢');
+    console.error('handleCommand error:', err);
+    try {
+      return ctx.send('Something went wrong executing the command 😢');
+    } catch (e) {
+      console.error('Failed to report error to user:', e);
+    }
   }
 }
 
-// ----- Message (prefix) handling wrapper that builds context expected by handleCommand -----
+// -------------------- Message (prefix) handler --------------------
 client.on('messageCreate', async message => {
-  try {
-    if (message.author.bot) return;
+  if (message.author.bot) return;
 
-    // Auto-replies (no prefix)
-    const raw = message.content.toLowerCase();
-    if (raw.includes('good morning')) {
-      const gif = await getTenorGif('good morning');
-      if (gif) {
-        const embed = new EmbedBuilder().setDescription('Good morning! 🌅').setImage(gif);
-        await message.channel.send({ embeds: [embed] });
-      } else {
-        await message.channel.send('Good morning! 🌅');
-      }
-      return;
-    }
-    if (raw.includes('welcome')) {
-      const gif = await getTenorGif('welcome');
-      if (gif) {
-        const embed = new EmbedBuilder().setDescription('Welcome! 👋').setImage(gif);
-        await message.channel.send({ embeds: [embed] });
-      } else {
-        await message.channel.send('Welcome! 👋');
-      }
-      return;
-    }
-
-    if (!message.content.startsWith(PREFIX)) return;
-
-    const args = message.content.slice(PREFIX.length).trim().split(/ +/);
-    const command = args.shift().toLowerCase();
-
-    const context = {
-      author: message.author,
-      member: message.member,
-      guild: message.guild,
-      channel: message.channel,
-      messageTimestamp: message.createdTimestamp,
-      mentions: message.mentions,
-      mentionedUser: message.mentions.users.first ? message.mentions.users.first() : null,
-      // functions used by handler
-      replyFn: async (m) => {
-        if (typeof m === 'string') return message.reply(m);
-        return message.reply(m);
-      },
-      sendFn: async (m) => {
-        if (typeof m === 'string') return message.channel.send(m);
-        return message.channel.send(m);
-      },
-    };
-
-    await handleCommand(context, command, args);
-
-  } catch (err) {
-    console.error('messageCreate top error:', err);
+  // Auto replies (no prefix)
+  const content = message.content.toLowerCase();
+  if (content.includes('good morning')) {
+    const gif = await getTenorGif('good morning');
+    return message.channel.send(gif || 'Good morning! 🌞');
   }
+  if (content.includes('welcome')) {
+    const gif = await getTenorGif('welcome');
+    return message.channel.send(gif || 'Welcome!');
+  }
+
+  if (!message.content.startsWith(PREFIX)) return;
+
+  // parse
+  const raw = message.content.slice(PREFIX.length).trim();
+  if (!raw) return;
+  const parts = raw.split(/ +/);
+  const command = parts.shift().toLowerCase();
+  const args = parts;
+
+  // for interactive commands using mentions, attach mentioned user to ctx
+  const ctx = makeContextForMessage(message);
+  // attach convenience for mentioned user
+  if (message.mentions && message.mentions.users && message.mentions.users.first) {
+    ctx._mentionedUser = message.mentions.users.first();
+  }
+
+  // call shared handler
+  await handleCommand(command, args, ctx);
 });
 
-// ----- Slash commands: translate slash interaction to command execution while wiring replies correctly -----
+// -------------------- Interaction (slash) handler --------------------
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
-  try {
-    await interaction.deferReply({ ephemeral: false }); // allow multiple followups
-    const commandName = interaction.commandName;
-    const options = interaction.options.data || [];
+  const commandName = interaction.commandName;
+  const opts = interaction.options.data || [];
+  // Build args array: for user type options we will pass user id; others pass value
+  const args = opts.map(o => {
+    if (o.type === 6) return o.value; // user id
+    return String(o.value);
+  });
 
-    // build args array from options (strings, integers, user ids) - preserve order
-    const args = options.map(opt => {
-      // user type is 6 in the registration; opt.value will be user id sometimes — prefer interaction.options.getUser
-      if (opt.type === 6) return interaction.options.getUser(opt.name).id;
-      return opt.value;
-    }).filter(Boolean);
+  const ctx = makeContextForInteraction(interaction);
 
-    // Build a context that maps sendFn/replyFn to interaction.reply/followUp
-    let firstReplySent = false;
-    const sendQueue = [];
-    const context = {
-      author: interaction.user,
-      member: interaction.member,
-      guild: interaction.guild,
-      channel: interaction.channel,
-      messageTimestamp: Date.now(),
-      mentions: {
-        first: () => {
-          // try to get first user option
-          const uOpt = options.find(o => o.type === 6);
-          if (!uOpt) return null;
-          return interaction.options.getUser(uOpt.name);
-        }
-      },
-      replyFn: async (m) => {
-        if (!firstReplySent) {
-          firstReplySent = true;
-          if (typeof m === 'string') return interaction.editReply({ content: m });
-          return interaction.editReply(m);
-        } else {
-          return interaction.followUp(typeof m === 'string' ? { content: m } : m);
-        }
-      },
-      sendFn: async (m) => {
-        return context.replyFn(m);
-      }
-    };
-
-    await handleCommand(context, commandName, args);
-    // If no reply was made at all (edge case), finalize with a small ping
-    // (We assume handleCommand always replies; if not, ensure we editReply)
-    // No extra handling here.
-
-  } catch (err) {
-    console.error('Slash command error:', err);
-    try { await interaction.followUp({ content: 'Something went wrong 😢', ephemeral: false }); } catch {}
+  // attach mentioned user when appropriate (so hug/slap can use it)
+  if (opts.length) {
+    const userOpt = opts.find(o => o.type === 6);
+    if (userOpt) {
+      // fetch member if possible
+      try {
+        const mem = await interaction.guild.members.fetch(userOpt.value);
+        if (mem) ctx._mentionedUser = mem.user;
+      } catch {}
+    }
   }
+
+  // run command
+  await handleCommand(commandName, args, ctx);
 });
 
-// ----- Ready -----
+// -------------------- Ready --------------------
 client.once('ready', async () => {
-  console.log(`Bot is ready! Logged in as ${client.user.tag}`);
-  await registerSlashCommands().catch(err => console.error('Slash register error:', err));
+  console.log(`Bot ready! Logged in as ${client.user.tag}`);
+  await registerSlashCommands().catch(console.error);
 });
 
-// ----- login -----
+// -------------------- Login --------------------
 client.login(DISCORD_TOKEN).catch(err => {
-  console.error('Failed to login:', err && err.message ? err.message : err);
+  console.error('Login failed:', err);
   process.exit(1);
 });
