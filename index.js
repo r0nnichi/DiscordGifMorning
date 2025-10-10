@@ -758,6 +758,39 @@ client.on('interactionCreate', async interaction => {
 
   await handleCommand(commandName, args, ctx);
 });
+// ---------- Prefix (message) handler ----------
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+  if (!message.content.startsWith(PREFIX)) return;
+
+  const args = message.content.slice(PREFIX.length).trim().split(/ +/);
+  const command = args.shift()?.toLowerCase();
+
+  console.log(`Prefix command detected: ${command} by ${message.author.id} in guild ${message.guild?.id}`);
+
+  // Build ctx object (so ctx.send works!)
+  const ctx = {
+    send: async (content) => {
+      try {
+        return await message.channel.send(typeof content === 'string' ? { content } : content);
+      } catch (err) {
+        console.error('Prefix send error', err);
+      }
+    },
+    author: message.author,
+    member: message.member,
+    guild: message.guild,
+    channel: message.channel,
+    _mentionedUser: message.mentions.users.first() || null,
+  };
+
+  try {
+    await handleCommand(command, args, ctx);
+  } catch (err) {
+    console.error('Error executing prefix command:', err);
+    await message.channel.send('❌ Error while executing that command.');
+  }
+});
 
 // ---------- Ready ----------
 client.once('ready', async () => {
