@@ -1,8 +1,10 @@
-// index.js — debug version with higher shop prices and added console logs for troubleshooting:
-// - Shop prices increased: 500, 250, 1000 (daily is 100, so rarer items)
-// - Added console logs in key places: ready, messageCreate (prefix detection), interactionCreate, handleCommand start/error
-// - Logs will help see if events fire and where it fails
-// - No other changes; redeploy and check Render logs when triggering commands
+// index.js — fixed version:
+// - Added deferReply for all slash commands to prevent timeouts (shows "thinking..." then responds)
+// - Modified ctx.send to use editReply after defer
+// - Removed owner commands from help menu
+// - Added logs for auto-replies (good morning/welcome)
+// - Increased shop prices remain
+// - Kept other debug logs
 
 require('dotenv').config();
 const fs = require('fs');
@@ -219,12 +221,6 @@ function evaluateHand(hand) {
 
 // ---------- Shared command handler ----------
 async function handleCommand(command, args, ctx) {
-  // ctx must provide:
-  // - send(contentOrObject) => sends message or embed
-  // - author (User)
-  // - member (GuildMember) optional
-  // - guild optional
-  // also ctx._mentionedUser may be set (User)
   try {
     command = (command || '').toLowerCase();
     console.log(`Executing command: ${command} by ${ctx.author.id} in guild ${ctx.guild?.id || 'DM'}`);
@@ -239,8 +235,7 @@ async function handleCommand(command, args, ctx) {
           `**Interactive:**\n${PREFIX}hug @user, ${PREFIX}slap @user, ${PREFIX}highfive @user, ${PREFIX}touch @user, ${PREFIX}roll, ${PREFIX}pick option1 | option2\n\n` +
           `**Utility:**\n${PREFIX}ping, ${PREFIX}serverinfo, ${PREFIX}userinfo @user, ${PREFIX}avatar @user\n\n` +
           `**Steal:**\n${PREFIX}stealemoji <emoji_id or url or <:name:id>>\n${PREFIX}stealsticker <sticker_id or url>\n\n` +
-          `**Currency:**\n${PREFIX}balance [@user], ${PREFIX}daily, ${PREFIX}pay <@user> <amount>, ${PREFIX}gamble <amount> [coin|slots|poker], ${PREFIX}shop, ${PREFIX}buy <item>, ${PREFIX}use <item>, ${PREFIX}inventory, ${PREFIX}trade <@user> <item>, ${PREFIX}leaderboard\n\n` +
-          `**Owner:** givemoney, takemoney`
+          `**Currency:**\n${PREFIX}balance [@user], ${PREFIX}daily, ${PREFIX}pay <@user> <amount>, ${PREFIX}gamble <amount> [coin|slots|poker], ${PREFIX}shop, ${PREFIX}buy <item>, ${PREFIX}use <item>, ${PREFIX}inventory, ${PREFIX}trade <@user> <item>, ${PREFIX}leaderboard\n`
         )
         .setColor('Random');
       return ctx.send({ embeds: [embed] });
@@ -674,10 +669,12 @@ client.on('messageCreate', async message => {
   // Auto replies
   const content = (message.content || '').toLowerCase();
   if (content.includes('good morning')) {
+    console.log(`Auto-reply triggered: good morning in message by ${message.author.id} in guild ${message.guild?.id}`);
     const gif = await getTenorGif('good morning');
     return message.channel.send(gif || 'Good morning! 🌞');
   }
   if (content.includes('welcome')) {
+    console.log(`Auto-reply triggered: welcome in message by ${message.author.id} in guild ${message.guild?.id}`);
     const gif = await getTenorGif('welcome');
     return message.channel.send(gif || 'Welcome!');
   }
@@ -712,6 +709,9 @@ client.on('interactionCreate', async interaction => {
 
   console.log(`Slash command detected: ${interaction.commandName} by ${interaction.user.id} in guild ${interaction.guild?.id}`);
 
+  // Defer reply to avoid timeout
+  await interaction.deferReply();
+
   const commandName = interaction.commandName;
   const opts = interaction.options?.data || [];
 
@@ -729,7 +729,8 @@ client.on('interactionCreate', async interaction => {
       try {
         if (!replied) {
           replied = true;
-          return await interaction.reply(typeof content === 'string' ? { content } : content);
+          // Since deferred, use editReply for first response
+          return await interaction.editReply(typeof content === 'string' ? { content } : content);
         } else {
           return await interaction.followUp(typeof content === 'string' ? { content } : content);
         }
