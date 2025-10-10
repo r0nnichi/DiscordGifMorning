@@ -1,734 +1,197 @@
-// index.js — DiscordGifMorning (FULL merged, CommonJS)
-// - Prefix + Slash commands
-// - JSON economy (balances.json)
-// - Tenor GIFs / cat / dog / joke / quote / fact
-// - Auto-replies and welcome messages
-// - Single messageCreate handler to avoid duplication
-// - Defer + edit replies for slash commands to avoid "application did not respond"
-
-'use strict';
-
+// index.js
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
+const fetch = require('node-fetch');
 require('dotenv').config();
-const fs = require('fs');
-const path = require('path');
-const express = require('express');
-const {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  REST,
-  Routes,
-  EmbedBuilder,
-  PermissionsBitField,
-} = require('discord.js');
 
-// fetch compatibility
-let fetchFn;
-if (typeof fetch === 'function') fetchFn = fetch;
-else {
-  try { fetchFn = require('node-fetch'); } catch (e) {
-    // graceful fallback — commands that need fetch will fail with a helpful message
-    fetchFn = async () => { throw new Error('fetch not available (install node-fetch or use Node 18+)'); };
-  }
-}
-
-// ---------- Config ----------
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const TENOR_API_KEY = process.env.TENOR_API_KEY || '';
-const OWNER_ID = process.env.OWNER_ID || '';
-const GUILD_ID = process.env.GUILD_ID || ''; // optional - for guild-scoped slash registration (faster)
-const PREFIX = (process.env.PREFIX && process.env.PREFIX.length) ? process.env.PREFIX : ']';
-const PORT = process.env.PORT || 3000;
-const DATA_FILE = path.join(__dirname, 'balances.json');
-const COOLDOWN_TIME = 10 * 1000; // gamble cooldown
-
-if (!DISCORD_TOKEN) {
-  console.error('FATAL: DISCORD_TOKEN must be set in env.');
-  process.exit(1);
-}
-
-// ---------- Bot client ----------
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
-  ],
-  partials: [Partials.Channel],
+// Basic bot client
+const client = new Client({ 
+    intents: [
+        GatewayIntentBits.Guilds, 
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMembers
+    ] 
 });
 
-// ---------- Data persistence ----------
-function ensureDataFile() {
-  try {
-    if (!fs.existsSync(DATA_FILE)) {
-      fs.writeFileSync(DATA_FILE, JSON.stringify({ users: {} }, null, 2));
-    }
-  } catch (e) {
-    console.error('ensureDataFile error', e);
-  }
-}
-function loadData() {
-  ensureDataFile();
-  try {
-    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  } catch (e) {
-    console.error('loadData failed — recreating file', e);
-    try {
-      fs.writeFileSync(DATA_FILE, JSON.stringify({ users: {} }, null, 2));
-    } catch (err) { console.error('recreate failed', err); }
-    return { users: {} };
-  }
-}
-function saveData(d) {
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(d, null, 2));
-  } catch (e) {
-    console.error('saveData failed', e);
-  }
-}
-let data = loadData();
-function ensureUser(id) {
-  if (!data.users[id]) data.users[id] = { balance: 0, lastDaily: 0, inventory: [] };
-  return data.users[id];
-}
+// ---------------------
+// Economy storage (in-memory for now, can swap with DB)
+let economy = {};
+const shopItems = {
+    "apple": 50,
+    "sword": 500,
+    "shield": 400
+};
 
-// ---------- Keep-alive server (Render / Replit) ----------
-const app = express();
-app.get('/', (req, res) => res.send('DiscordGifMorning is alive!'));
-app.listen(PORT, () => console.log(`Keep-alive server running on port ${PORT}`));
-
-// ---------- Tenor helper ----------
-async function getTenorGif(keyword) {
-  if (!TENOR_API_KEY) return null;
-  try {
-    const url = `https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(keyword)}&key=${TENOR_API_KEY}&limit=20`;
-    const res = await fetchFn(url);
-    const json = await res.json();
-    if (!json || !json.results || json.results.length === 0) return null;
-    const pick = json.results[Math.floor(Math.random() * json.results.length)];
-    if (pick?.media_formats?.gif?.url) return pick.media_formats.gif.url;
-    if (pick?.media_formats?.mediumgif?.url) return pick.media_formats.mediumgif.url;
-    const mf = Object.values(pick?.media_formats || {})[0];
-    if (mf?.url) return mf.url;
-    return pick.url || null;
-  } catch (err) {
-    console.error('Tenor error', err);
+// ---------------------
+// Helper Functions
+const getGif = async (keyword) => {
+    const url = `https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(keyword)}&key=${process.env.TENOR_KEY}&client_key=mydiscordbot&limit=10`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if(data.results && data.results.length > 0){
+        return data.results[Math.floor(Math.random()*data.results.length)].media_formats.gif.url;
+    } 
     return null;
-  }
-}
+};
 
-// ---------- Shop ----------
-const SHOP = [
-  { id: 'rolecolor', name: 'Role Color Change (mock perk)', price: 500 },
-  { id: 'nickname', name: 'Nickname Change (mock perk)', price: 250 },
-  { id: 'customemoji', name: 'Custom Emoji Slot (mock perk)', price: 1000 },
+const ensureUser = (id) => {
+    if(!economy[id]){
+        economy[id] = { balance: 0, inventory: {} };
+    }
+};
+
+// ---------------------
+// Slash Commands
+const commands = [
+    // Fun GIF commands
+    new SlashCommandBuilder().setName('gif').setDescription('Get a gif').addStringOption(option => option.setName('keyword').setDescription('Keyword for gif').setRequired(true)),
+    new SlashCommandBuilder().setName('joke').setDescription('Get a joke'),
+    new SlashCommandBuilder().setName('8ball').setDescription('Ask the magic 8ball').addStringOption(option => option.setName('question').setDescription('Your question').setRequired(true)),
+
+    // Interactive
+    new SlashCommandBuilder().setName('hug').setDescription('Hug someone').addUserOption(option => option.setName('target').setDescription('User to hug').setRequired(true)),
+    new SlashCommandBuilder().setName('slap').setDescription('Slap someone').addUserOption(option => option.setName('target').setDescription('User to slap').setRequired(true)),
+
+    // Utility
+    new SlashCommandBuilder().setName('ping').setDescription('Check ping'),
+    new SlashCommandBuilder().setName('userinfo').setDescription('Get user info').addUserOption(option => option.setName('target').setDescription('User info to fetch').setRequired(false)),
+    new SlashCommandBuilder().setName('avatar').setDescription('Get user avatar').addUserOption(option => option.setName('target').setDescription('User avatar').setRequired(false)),
+
+    // Economy
+    new SlashCommandBuilder().setName('balance').setDescription('Check your balance'),
+    new SlashCommandBuilder().setName('daily').setDescription('Claim daily reward'),
+    new SlashCommandBuilder().setName('pay').setDescription('Pay another user').addUserOption(option => option.setName('target').setDescription('User to pay').setRequired(true)).addIntegerOption(option => option.setName('amount').setDescription('Amount').setRequired(true)),
+    new SlashCommandBuilder().setName('shop').setDescription('View shop items'),
+    new SlashCommandBuilder().setName('buy').setDescription('Buy an item').addStringOption(option => option.setName('item').setDescription('Item name').setRequired(true)),
+    new SlashCommandBuilder().setName('inventory').setDescription('Check inventory'),
+    new SlashCommandBuilder().setName('gamble').setDescription('Gamble your coins').addIntegerOption(option => option.setName('amount').setDescription('Amount to gamble').setRequired(true))
 ];
 
-// ---------- Slash commands list ----------
-const SLASH_COMMANDS = [
-  // fun
-  { name: 'joke', description: 'Get a random joke' },
-  { name: 'meme', description: 'Get a random meme' },
-  { name: 'cat', description: 'Get a random cat gif' },
-  { name: 'dog', description: 'Get a random dog gif' },
-  { name: 'gif', description: 'Search a gif', options: [{ name: 'keyword', type: 3, description: 'Keyword', required: true }] },
-  { name: '8ball', description: 'Ask the magic 8ball', options: [{ name: 'question', type: 3, description: 'Your question', required: true }] },
-  { name: 'coinflip', description: 'Flip a coin' },
-  { name: 'fact', description: 'Get a random fact' },
-  { name: 'quote', description: 'Get a random quote' },
-
-  // interact
-  { name: 'hug', description: 'Hug a user', options: [{ name: 'user', type: 6, description: 'User', required: true }] },
-  { name: 'slap', description: 'Slap a user', options: [{ name: 'user', type: 6, description: 'User', required: true }] },
-  { name: 'highfive', description: 'Highfive a user', options: [{ name: 'user', type: 6, description: 'User', required: true }] },
-
-  // util
-  { name: 'ping', description: 'Check bot latency' },
-  { name: 'help', description: 'Show commands and usage' },
-  { name: 'balance', description: 'Check balance', options: [{ name: 'user', type: 6, description: 'User (optional)', required: false }] },
-  { name: 'daily', description: 'Claim daily coins' },
-  { name: 'pay', description: 'Send coins', options: [{ name: 'user', type: 6, description: 'Recipient', required: true }, { name: 'amount', type: 4, description: 'Amount', required: true }] },
-  { name: 'inventory', description: 'Show your inventory' },
-  { name: 'shop', description: 'Show the shop' },
-  { name: 'buy', description: 'Buy an item', options: [{ name: 'item', type: 3, description: 'Item id', required: true }] },
-
-  // gamble
-  { name: 'gamble', description: 'Gamble coins (coin|slots|poker)', options: [{ name: 'amount', type: 4, description: 'Amount', required: true }, { name: 'type', type: 3, description: 'coin|slots|poker', required: false }] },
-
-  { name: 'leaderboard', description: 'Show top balances' },
-];
-
-// ---------- Register slash commands ----------
-async function registerSlashCommands() {
-  const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
-  try {
-    console.log('Refreshing application (/) commands...');
-    if (GUILD_ID) {
-      await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: SLASH_COMMANDS });
-      console.log('Slash commands registered to guild', GUILD_ID);
-    } else {
-      await rest.put(Routes.applicationCommands(client.user.id), { body: SLASH_COMMANDS });
-      console.log('Slash commands registered globally (may take up to 1 hour to propagate).');
+// ---------------------
+// Register commands
+const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+(async () => {
+    try{
+        console.log('Started refreshing application (/) commands.');
+        await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
+        console.log('Successfully reloaded application (/) commands.');
+    } catch(e){
+        console.error(e);
     }
-  } catch (err) {
-    console.error('Failed to register slash commands', err);
-  }
-}
+})();
 
-// ---------- Poker helper ----------
-function createDeck() {
-  const suits = ['♠', '♥', '♦', '♣'];
-  const ranks = [2,3,4,5,6,7,8,9,10,11,12,13,14];
-  const deck = [];
-  for (const s of suits) for (const r of ranks) deck.push({ r, s });
-  return deck;
-}
-function drawHand() {
-  const deck = createDeck();
-  const hand = [];
-  for (let i = 0; i < 5; i++) {
-    const idx = Math.floor(Math.random() * deck.length);
-    hand.push(deck.splice(idx,1)[0]);
-  }
-  return hand;
-}
-function evaluateHand(hand) {
-  const counts = {};
-  hand.forEach(c => counts[c.r] = (counts[c.r] || 0) + 1);
-  const countsArr = Object.values(counts).sort((a,b)=>b-a);
-  const uniqueRanks = Object.keys(counts).map(x=>parseInt(x,10)).sort((a,b)=>a-b);
-  const suits = hand.map(h=>h.s);
-  const flush = suits.every(s => s === suits[0]);
-  let straight = false;
-  if (uniqueRanks.length === 5 && uniqueRanks[4] - uniqueRanks[0] === 4) straight = true;
-  if (JSON.stringify(uniqueRanks) === JSON.stringify([2,3,4,5,14])) straight = true;
-  if (straight && flush) return { name: 'Straight Flush', multiplier: 8, rankValue: 800 };
-  if (countsArr[0] === 4) return { name: 'Four of a Kind', multiplier: 6, rankValue: 700 };
-  if (countsArr[0] === 3 && countsArr[1] === 2) return { name: 'Full House', multiplier: 4, rankValue: 600 };
-  if (flush) return { name: 'Flush', multiplier: 3.5, rankValue: 500 };
-  if (straight) return { name: 'Straight', multiplier: 3, rankValue: 400 };
-  if (countsArr[0] === 3) return { name: 'Three of a Kind', multiplier: 2.5, rankValue: 300 };
-  if (countsArr[0] === 2 && countsArr[1] === 2) return { name: 'Two Pair', multiplier: 2, rankValue: 200 };
-  if (countsArr[0] === 2) return { name: 'One Pair', multiplier: 1.5, rankValue: 100 };
-  return { name: 'High Card', multiplier: 0, rankValue: 10 };
-}
-
-// ---------- Shared command handler ----------
-const gambleCooldowns = new Map();
-
-async function handleCommand(command, args, ctx) {
-  try {
-    command = (command || '').toLowerCase();
-    console.log(`Executing command: ${command} by ${ctx.author.id} in guild ${ctx.guild?.id || 'DM'}`);
-
-    // HELP
-    if (command === 'help') {
-      const embed = new EmbedBuilder()
-        .setTitle('🤖 DiscordGifMorning — Commands')
-        .setDescription(
-          `**Prefix:** \`${PREFIX}command\` or use slash (/)\n\n` +
-          `**Fun:** ${PREFIX}joke, ${PREFIX}meme, ${PREFIX}cat, ${PREFIX}dog, ${PREFIX}gif <keyword>\n` +
-          `**Interact:** ${PREFIX}hug @user, ${PREFIX}slap @user\n` +
-          `**Utility:** ${PREFIX}ping, ${PREFIX}serverinfo, ${PREFIX}userinfo @user, ${PREFIX}avatar\n` +
-          `**Currency:** ${PREFIX}balance, ${PREFIX}daily, ${PREFIX}pay @user <amt>, ${PREFIX}gamble <amt> [coin|slots|poker], ${PREFIX}shop, ${PREFIX}buy <id>, ${PREFIX}inventory, ${PREFIX}leaderboard\n`
-        )
-        .setColor('Random');
-      return ctx.send({ embeds: [embed] });
-    }
-
-    // PING
-    if (command === 'ping') {
-      const latency = ctx._msgCreatedAt ? `${Date.now() - ctx._msgCreatedAt}ms` : `${Math.round(client.ws.ping)}ms`;
-      return ctx.send(`🏓 Pong! Latency: ${latency}`);
-    }
-
-    // JOKE
-    if (command === 'joke') {
-      try {
-        const r = await (await fetchFn('https://v2.jokeapi.dev/joke/Any')).json();
-        return ctx.send(r.type === 'single' ? r.joke : `${r.setup}\n${r.delivery}`);
-      } catch (e) {
-        return ctx.send('Could not fetch a joke right now.');
-      }
-    }
-
-    // MEME / GIFS
-    if (command === 'meme') {
-      const url = TENOR_API_KEY ? await getTenorGif('meme') : null;
-      return ctx.send(url || 'No meme GIF found.');
-    }
-    if (command === 'cat') {
-      try {
-        const res = await fetchFn('https://api.thecatapi.com/v1/images/search');
-        const j = await res.json();
-        return ctx.send(j?.[0]?.url || 'No cat found.');
-      } catch (e) { return ctx.send('Failed to fetch cat image.'); }
-    }
-    if (command === 'dog') {
-      try {
-        const res = await fetchFn('https://dog.ceo/api/breeds/image/random');
-        const j = await res.json();
-        return ctx.send(j?.message || 'No dog found.');
-      } catch (e) { return ctx.send('Failed to fetch dog image.'); }
-    }
-
-    // GIF search (Tenor)
-    if (command === 'gif') {
-      const kw = (args || []).join(' ').trim();
-      if (!kw) return ctx.send('Usage: gif <keyword>');
-      const url = await getTenorGif(kw);
-      return ctx.send(url || 'No GIF found.');
-    }
-
-    // FACT
-    if (command === 'fact') {
-      try {
-        const r = await (await fetchFn('https://uselessfacts.jsph.pl/random.json?language=en')).json();
-        return ctx.send(r.text || 'No fact found.');
-      } catch (e) { return ctx.send('Could not fetch a fact.'); }
-    }
-
-    // QUOTE
-    if (command === 'quote') {
-      try {
-        const r = await (await fetchFn('https://api.quotable.io/random')).json();
-        return ctx.send(`"${r.content}" — ${r.author}`);
-      } catch (e) { return ctx.send('Could not fetch a quote.'); }
-    }
-
-    // INTERACTIONS (hug/slap/highfive/touch)
-    if (['hug', 'slap', 'highfive', 'touch'].includes(command)) {
-      let user = ctx._mentionedUser || null;
-      if (!user && args && args[0]) {
-        const maybeId = args[0].replace(/[^0-9]/g, '');
-        if (ctx.guild && ctx.guild.members.cache.has(maybeId)) user = ctx.guild.members.cache.get(maybeId).user;
-      }
-      if (!user) return ctx.send('Please mention a user!');
-      if (user.id === ctx.author.id) return ctx.send(`You can't ${command} yourself!`);
-      const gif = TENOR_API_KEY ? await getTenorGif(command) : null;
-      const embed = new EmbedBuilder().setTitle(`${ctx.author.username} ${command}s ${user.username}!`).setColor('Random');
-      if (gif) embed.setImage(gif);
-      return ctx.send({ embeds: [embed] });
-    }
-
-    // ROLL
-    if (command === 'roll') {
-      const roll = Math.floor(Math.random() * 100) + 1;
-      return ctx.send(`🎲 You rolled: ${roll}`);
-    }
-
-    // PICK
-    if (command === 'pick') {
-      const options = args.join(' ').split('|').map(o => o.trim()).filter(Boolean);
-      if (options.length < 2) return ctx.send('Provide at least 2 options separated by |');
-      const choice = options[Math.floor(Math.random() * options.length)];
-      return ctx.send(`I pick: **${choice}**`);
-    }
-
-    // SERVER INFO
-    if (command === 'serverinfo') {
-      if (!ctx.guild) return ctx.send('Not in a guild context.');
-      const embed = new EmbedBuilder().setTitle(ctx.guild.name).setDescription(`ID: ${ctx.guild.id}\nMembers: ${ctx.guild.memberCount}`).setColor('Random');
-      return ctx.send({ embeds: [embed] });
-    }
-
-    // USERINFO / AVATAR
-    if (command === 'userinfo') {
-      let user = ctx.author;
-      if (args.length && ctx.guild) {
-        const id = args[0].replace(/[^0-9]/g, '');
-        const member = ctx.guild.members.cache.get(id);
-        if (member) user = member.user; else return ctx.send('User not found in this server.');
-      }
-      const embed = new EmbedBuilder().setTitle(user.tag).setDescription(`ID: ${user.id}`).setThumbnail(user.displayAvatarURL({ dynamic: true })).setColor('Random');
-      return ctx.send({ embeds: [embed] });
-    }
-    if (command === 'avatar') {
-      let user = ctx.author;
-      if (args.length && ctx.guild) {
-        const id = args[0].replace(/[^0-9]/g, '');
-        const member = ctx.guild.members.cache.get(id);
-        if (member) user = member.user; else return ctx.send('User not found in this server.');
-      }
-      return ctx.send(user.displayAvatarURL({ dynamic: true, size: 1024 }));
-    }
-
-    // STEAL EMOJI
-    if (command === 'stealemoji') {
-      if (!ctx.guild) return ctx.send('Must be used in a server.');
-      if (!ctx.member || !ctx.member.permissions.has(PermissionsBitField.Flags.ManageEmojisAndStickers)) return ctx.send('You need Manage Emojis & Stickers permission.');
-      const emojiInput = args[0];
-      if (!emojiInput) return ctx.send('Provide emoji (paste <:name:id>, id, or URL).');
-      let idMatch = emojiInput.match(/<a?:(\w+):(\d+)>/);
-      let url = null;
-      let name = idMatch ? idMatch[1] : `emoji_${Date.now()}`;
-      let ext = '.png';
-      if (emojiInput.startsWith('<a:')) ext = '.gif';
-      if (emojiInput.startsWith('http')) url = emojiInput;
-      else if (idMatch) url = `https://cdn.discordapp.com/emojis/${idMatch[2]}${ext}`;
-      else if (/^\d+$/.test(emojiInput)) url = `https://cdn.discordapp.com/emojis/${emojiInput}${ext}`;
-      else url = emojiInput;
-      try {
-        const created = await ctx.guild.emojis.create({ attachment: url, name });
-        return ctx.send(`Emoji added: ${created.toString()}`);
-      } catch (err) {
-        console.error('Add emoji failed', err);
-        // try alternate extension
-        try {
-          const alt = ext === '.png' ? '.gif' : '.png';
-          url = url.replace(ext, alt);
-          const created = await ctx.guild.emojis.create({ attachment: url, name });
-          return ctx.send(`Emoji added (fallback): ${created.toString()}`);
-        } catch (e) {
-          return ctx.send(`Failed to add emoji: ${err?.message || err}`);
-        }
-      }
-    }
-
-    // STEAL STICKER
-    if (command === 'stealsticker') {
-      if (!ctx.guild) return ctx.send('Must be used in a server.');
-      if (!ctx.member || !ctx.member.permissions.has(PermissionsBitField.Flags.ManageEmojisAndStickers)) return ctx.send('You need Manage Emojis & Stickers permission.');
-      const stickerInput = args[0];
-      if (!stickerInput) return ctx.send('Provide sticker id or URL.');
-      let url = stickerInput.startsWith('http') ? stickerInput : `https://cdn.discordapp.com/stickers/${stickerInput}.png`;
-      try {
-        const sticker = await ctx.guild.stickers.create({ file: url, name: `sticker_${Date.now()}`, description: 'Imported sticker', tags: 'fun' });
-        return ctx.send(`Sticker added: ${sticker.name}`);
-      } catch (err) {
-        console.error('Add sticker failed', err);
-        return ctx.send(`Failed to add sticker: ${err?.message || err}`);
-      }
-    }
-
-    // ---------- ECONOMY ----------
-    if (command === 'balance') {
-      const id = args && args[0] ? args[0].replace(/[^0-9]/g, '') : ctx.author.id;
-      if (!id) return ctx.send('User not specified.');
-      const u = ensureUser(id);
-      const embed = new EmbedBuilder().setTitle('Balance').setDescription(`<@${id}> has **${u.balance}** coins`).setColor('Gold');
-      return ctx.send({ embeds: [embed] });
-    }
-
-    if (command === 'daily') {
-      const uid = ctx.author.id;
-      const u = ensureUser(uid);
-      const now = Date.now();
-      const oneDay = 24 * 60 * 60 * 1000;
-      if (now - (u.lastDaily || 0) < oneDay) {
-        const left = Math.ceil((oneDay - (now - u.lastDaily)) / (60 * 60 * 1000));
-        return ctx.send(`You already claimed daily. Try again in about ${left} hour(s).`);
-      }
-      const amount = 100;
-      u.balance += amount;
-      u.lastDaily = now;
-      saveData(data);
-      return ctx.send(`You claimed your daily **${amount}** coins! New balance: **${u.balance}**`);
-    }
-
-    if (command === 'pay' || command === 'send') {
-      const targetId = (args[0] || '').replace(/[^0-9]/g, '');
-      const amt = parseInt(args[1], 10);
-      if (!targetId || !amt || amt <= 0) return ctx.send('Usage: pay <@user> <amount>');
-      if (targetId === ctx.author.id) return ctx.send("You can't pay yourself.");
-      const sender = ensureUser(ctx.author.id);
-      if (sender.balance < amt) return ctx.send("You don't have enough coins.");
-      const receiver = ensureUser(targetId);
-      sender.balance -= amt;
-      receiver.balance += amt;
-      saveData(data);
-      return ctx.send(`✅ Sent **${amt}** coins to <@${targetId}>. New balance: **${sender.balance}**`);
-    }
-
-    if (command === 'inventory' || command === 'inv') {
-      const u = ensureUser(ctx.author.id);
-      const inv = u.inventory || [];
-      if (!inv.length) return ctx.send('Your inventory is empty.');
-      return ctx.send({ embeds: [new EmbedBuilder().setTitle(`${ctx.author.username}'s Inventory`).setDescription(inv.map(i => `• ${i}`).join('\n')).setColor('Blue')] });
-    }
-
-    if (command === 'shop') {
-      const embed = new EmbedBuilder().setTitle('Shop').setColor('Purple');
-      embed.setDescription(SHOP.map(i => `**${i.id}** — ${i.name} — ${i.price} coins`).join('\n'));
-      return ctx.send({ embeds: [embed] });
-    }
-
-    if (command === 'buy') {
-      const itemId = (args[0] || '').toLowerCase();
-      if (!itemId) return ctx.send('Usage: buy <item_id>');
-      const item = SHOP.find(s => s.id.toLowerCase() === itemId);
-      if (!item) return ctx.send('Item not found.');
-      const u = ensureUser(ctx.author.id);
-      if (u.balance < item.price) return ctx.send("You don't have enough coins.");
-      u.balance -= item.price;
-      u.inventory = u.inventory || [];
-      u.inventory.push(item.id);
-      saveData(data);
-      return ctx.send(`You bought **${item.name}** for **${item.price}** coins. New balance: **${u.balance}**`);
-    }
-
-    if (command === 'use') {
-      const itemId = (args[0] || '').toLowerCase();
-      if (!itemId) return ctx.send('Usage: use <item_id>');
-      const u = ensureUser(ctx.author.id);
-      if (!u.inventory || !u.inventory.includes(itemId)) return ctx.send("You don't own that item.");
-      u.inventory = u.inventory.filter(i => i !== itemId);
-      saveData(data);
-      return ctx.send(`You used **${itemId}**! (Mock action)`);
-    }
-
-    if (command === 'trade') {
-      const targetId = (args[0] || '').replace(/[^0-9]/g, '');
-      const itemId = (args[1] || '').toLowerCase();
-      if (!targetId || !itemId) return ctx.send('Usage: trade <@user> <item_id>');
-      const me = ensureUser(ctx.author.id);
-      const you = ensureUser(targetId);
-      if (!me.inventory || !me.inventory.includes(itemId)) return ctx.send("You don't own that item.");
-      me.inventory = me.inventory.filter(i => i !== itemId);
-      you.inventory = you.inventory || [];
-      you.inventory.push(itemId);
-      saveData(data);
-      return ctx.send(`Transferred **${itemId}** to <@${targetId}>.`);
-    }
-
-    if (command === 'leaderboard' || command === 'lb') {
-      const users = Object.entries(data.users).sort((a,b) => b[1].balance - a[1].balance).slice(0,10);
-      if (!users.length) return ctx.send('No users with balances yet.');
-      const embed = new EmbedBuilder().setTitle('Leaderboard (Top)').setColor('Green');
-      embed.setDescription(users.map(([id,u], idx) => `${idx+1}. <@${id}> — **${u.balance}**`).join('\n'));
-      return ctx.send({ embeds: [embed] });
-    }
-
-    // GAMBLE
-    if (command === 'gamble' || command === 'bet') {
-      const uid = ctx.author.id;
-      const now = Date.now();
-      if (gambleCooldowns.has(uid) && now - gambleCooldowns.get(uid) < COOLDOWN_TIME) {
-        const left = Math.ceil((COOLDOWN_TIME - (now - gambleCooldowns.get(uid))) / 1000);
-        return ctx.send(`Cooldown! Wait ${left} second(s) before gambling again.`);
-      }
-      gambleCooldowns.set(uid, now);
-
-      const amt = parseInt(args[0], 10);
-      const type = (args[1] || 'coin').toLowerCase();
-      if (!amt || amt <= 0) return ctx.send('Usage: gamble <amount> [coin|slots|poker]');
-      const u = ensureUser(uid);
-      if (amt > u.balance) return ctx.send("You don't have enough coins.");
-      u.balance -= amt;
-
-      if (type === 'coin' || type === 'coinflip') {
-        const win = Math.random() < 0.5;
-        if (win) {
-          const payout = amt * 2;
-          u.balance += payout;
-          saveData(data);
-          return ctx.send(`You won! Gained **${payout - amt}** profit. New balance: **${u.balance}**`);
-        } else {
-          saveData(data);
-          return ctx.send(`You lost **${amt}** coins. New balance: **${u.balance}**`);
-        }
-      }
-
-      if (type === 'slots') {
-        const symbols = ['🍒','🍋','🍊','🍇','🔔','⭐'];
-        const s1 = symbols[Math.floor(Math.random()*symbols.length)];
-        const s2 = symbols[Math.floor(Math.random()*symbols.length)];
-        const s3 = symbols[Math.floor(Math.random()*symbols.length)];
-        let multiplier = 0;
-        if (s1 === s2 && s2 === s3) multiplier = 6;
-        else if (s1 === s2 || s2 === s3 || s1 === s3) multiplier = 3;
-        const payout = amt * multiplier;
-        if (payout > 0) {
-          u.balance += payout;
-          saveData(data);
-          return ctx.send(`Slots: ${s1} ${s2} ${s3}\n🎉 Won **${payout - amt}** profit! New balance: **${u.balance}**`);
-        } else {
-          saveData(data);
-          return ctx.send(`Slots: ${s1} ${s2} ${s3}\n😢 Lost **${amt}**. New balance: **${u.balance}**`);
-        }
-      }
-
-      if (type === 'poker') {
-        const hand = drawHand();
-        const evalRes = evaluateHand(hand);
-        const rankMap = {11:'J',12:'Q',13:'K',14:'A'};
-        const handStr = hand.map(c => `${rankMap[c.r] || c.r}${c.s}`).join(' ');
-        const multiplier = evalRes.multiplier;
-        const payout = Math.floor(amt * multiplier);
-        if (multiplier > 0) {
-          u.balance += payout;
-          saveData(data);
-          return ctx.send(`Hand: ${handStr}\n${evalRes.name} — Won **${payout - amt}** profit! New balance: **${u.balance}**`);
-        } else {
-          saveData(data);
-          return ctx.send(`Hand: ${handStr}\n${evalRes.name} — Lost **${amt}**. New balance: **${u.balance}**`);
-        }
-      }
-
-      return ctx.send('Unknown gamble type. Use coin, slots, or poker.');
-    }
-
-    // OWNER: givemoney / takemoney
-    if (command === 'givemoney') {
-      if (ctx.author.id !== OWNER_ID) return ctx.send('Only the owner can use that.');
-      const target = (args[0] || '').replace(/[^0-9]/g, '');
-      const amount = parseInt(args[1], 10);
-      if (!target || !amount) return ctx.send('Usage: givemoney <user_id> <amount>');
-      const u = ensureUser(target);
-      u.balance += amount;
-      saveData(data);
-      return ctx.send(`Gave ${amount} coins to <@${target}>.`);
-    }
-    if (command === 'takemoney') {
-      if (ctx.author.id !== OWNER_ID) return ctx.send('Only the owner can use that.');
-      const target = (args[0] || '').replace(/[^0-9]/g, '');
-      const amount = parseInt(args[1], 10);
-      if (!target || !amount) return ctx.send('Usage: takemoney <user_id> <amount>');
-      const u = ensureUser(target);
-      u.balance = Math.max(0, u.balance - amount);
-      saveData(data);
-      return ctx.send(`Took ${amount} coins from <@${target}>.`);
-    }
-
-    // fallback
-    return ctx.send('Unknown command. Use help to see available commands.');
-  } catch (err) {
-    console.error('handleCommand error', err);
-    try { return ctx.send('Something went wrong executing that command.'); } catch (e) { console.error('failed to notify user', e); }
-  }
-}
-
-// ---------- Single messageCreate handler (prefix + autoreplies) ----------
-client.on('messageCreate', async (message) => {
-  if (!message || !message.author) return;
-  if (message.author.bot) return;
-
-  const content = (message.content || '').toLowerCase();
-
-  // auto replies
-  if (content.includes('good morning')) {
-    console.log(`Auto-reply triggered: good morning in message by ${message.author.id} in guild ${message.guild?.id}`);
-    const gif = TENOR_API_KEY ? await getTenorGif('good morning') : null;
-    return message.channel.send(gif || `Good morning, ${message.author.username}!`);
-  }
-  if (content.includes('welcome')) {
-    console.log(`Auto-reply triggered: welcome in message by ${message.author.id} in guild ${message.guild?.id}`);
-    const gif = TENOR_API_KEY ? await getTenorGif('welcome') : null;
-    return message.channel.send(gif || `Welcome, ${message.author.username}!`);
-  }
-
-  // Prefix commands
-  if (!content.startsWith(PREFIX)) return;
-  const raw = message.content.slice(PREFIX.length).trim();
-  if (!raw) return;
-  const parts = raw.split(/ +/);
-  const command = (parts.shift() || '').toLowerCase();
-  const args = parts;
-
-  console.log(`Prefix command detected: ${command} by ${message.author.id} in guild ${message.guild?.id}`);
-
-  // Build ctx for prefix
-  const ctx = {
-    source: 'prefix',
-    author: message.author,
-    member: message.member,
-    guild: message.guild,
-    channel: message.channel,
-    _msgCreatedAt: message.createdTimestamp,
-    _mentionedUser: message.mentions?.users?.first() || null,
-    send: async (payload) => {
-      try {
-        if (typeof payload === 'string') return await message.channel.send({ content: payload });
-        return await message.channel.send(payload);
-      } catch (err) {
-        console.error('prefix send error', err);
-      }
-    }
-  };
-
-  await handleCommand(command, args, ctx);
-});
-
-// ---------- Interaction handler (slash) ----------
+// ---------------------
+// Interaction handler
 client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
+    if(!interaction.isChatInputCommand()) return;
 
-  console.log(`Slash command detected: ${interaction.commandName} by ${interaction.user.id} in guild ${interaction.guild?.id}`);
+    const { commandName } = interaction;
+    const userId = interaction.user.id;
+    ensureUser(userId);
 
-  // Defer to avoid "application did not respond"
-  try {
-    await interaction.deferReply({ ephemeral: false });
-  } catch (e) {
-    console.warn('deferReply failed:', e?.message || e);
-  }
-
-  const commandName = interaction.commandName;
-  // Build args from options (order preserved)
-  const opts = interaction.options;
-  const args = [];
-  try {
-    for (const opt of opts.data || []) {
-      // option.value may be object for subcommands; stringify simply
-      if (typeof opt.value === 'string' || typeof opt.value === 'number') args.push(String(opt.value));
-      else if (opt.user) args.push(String(opt.user.id));
-      else if (opt.member) args.push(String(opt.member.user?.id || ''));
-      else args.push(String(opt.value || ''));
+    // ---- Fun ----
+    if(commandName === 'gif'){
+        const keyword = interaction.options.getString('keyword');
+        const url = await getGif(keyword);
+        if(url) return interaction.reply({ content: url });
+        return interaction.reply({ content: "No gif found!" });
     }
-  } catch (e) {
-    // ignore
-  }
 
-  let replied = false;
-  const ctx = {
-    source: 'slash',
-    author: interaction.user,
-    member: interaction.member,
-    guild: interaction.guild,
-    channel: interaction.channel,
-    _mentionedUser: interaction.options.getUser ? interaction.options.getUser('user') : null,
-    send: async (payload) => {
-      try {
-        if (!replied) {
-          replied = true;
-          if (typeof payload === 'string') return await interaction.editReply({ content: payload });
-          return await interaction.editReply(payload);
+    if(commandName === 'joke'){
+        const res = await fetch('https://v2.jokeapi.dev/joke/Any');
+        const data = await res.json();
+        if(data.type === 'single') return interaction.reply(data.joke);
+        return interaction.reply(`${data.setup}\n||${data.delivery}||`);
+    }
+
+    if(commandName === '8ball'){
+        const answers = ["Yes","No","Maybe","Definitely","Absolutely not","Ask again later"];
+        return interaction.reply(answers[Math.floor(Math.random()*answers.length)]);
+    }
+
+    // ---- Interactive ----
+    if(commandName === 'hug' || commandName === 'slap'){
+        const target = interaction.options.getUser('target');
+        const action = commandName;
+        const url = await getGif(action);
+        return interaction.reply({ content: `${interaction.user} ${action}s ${target}`, files: [url] });
+    }
+
+    // ---- Utility ----
+    if(commandName === 'ping'){
+        return interaction.reply(`Pong! ${client.ws.ping}ms`);
+    }
+
+    if(commandName === 'userinfo'){
+        const target = interaction.options.getUser('target') || interaction.user;
+        return interaction.reply(`User: ${target.tag}\nID: ${target.id}\nCreated: ${target.createdAt}`);
+    }
+
+    if(commandName === 'avatar'){
+        const target = interaction.options.getUser('target') || interaction.user;
+        return interaction.reply(target.displayAvatarURL({ dynamic: true, size: 512 }));
+    }
+
+    // ---- Economy ----
+    if(commandName === 'balance'){
+        return interaction.reply(`You have ${economy[userId].balance} coins.`);
+    }
+
+    if(commandName === 'daily'){
+        const lastClaim = economy[userId].lastDaily || 0;
+        const now = Date.now();
+        if(now - lastClaim < 24*60*60*1000) return interaction.reply("You already claimed your daily today.");
+        economy[userId].balance += 100;
+        economy[userId].lastDaily = now;
+        return interaction.reply("You claimed 100 coins daily!");
+    }
+
+    if(commandName === 'pay'){
+        const target = interaction.options.getUser('target');
+        const amount = interaction.options.getInteger('amount');
+        ensureUser(target.id);
+        if(economy[userId].balance < amount) return interaction.reply("Not enough coins.");
+        economy[userId].balance -= amount;
+        economy[target.id].balance += amount;
+        return interaction.reply(`You paid ${amount} coins to ${target.tag}`);
+    }
+
+    if(commandName === 'shop'){
+        const items = Object.entries(shopItems).map(([item, price]) => `${item}: ${price} coins`).join('\n');
+        return interaction.reply(`Shop Items:\n${items}`);
+    }
+
+    if(commandName === 'buy'){
+        const item = interaction.options.getString('item');
+        if(!shopItems[item]) return interaction.reply("Item does not exist!");
+        if(economy[userId].balance < shopItems[item]) return interaction.reply("Not enough coins!");
+        economy[userId].balance -= shopItems[item];
+        if(!economy[userId].inventory[item]) economy[userId].inventory[item] = 0;
+        economy[userId].inventory[item] += 1;
+        return interaction.reply(`You bought 1 ${item}`);
+    }
+
+    if(commandName === 'inventory'){
+        const items = Object.entries(economy[userId].inventory).map(([item, qty]) => `${item}: ${qty}`).join('\n') || "Empty";
+        return interaction.reply(`Your Inventory:\n${items}`);
+    }
+
+    if(commandName === 'gamble'){
+        const amount = interaction.options.getInteger('amount');
+        if(economy[userId].balance < amount) return interaction.reply("Not enough coins.");
+        const win = Math.random() < 0.5;
+        if(win){
+            economy[userId].balance += amount;
+            return interaction.reply(`You won! You now have ${economy[userId].balance} coins.`);
         } else {
-          if (typeof payload === 'string') return await interaction.followUp({ content: payload });
-          return await interaction.followUp(payload);
+            economy[userId].balance -= amount;
+            return interaction.reply(`You lost! You now have ${economy[userId].balance} coins.`);
         }
-      } catch (err) {
-        console.error('interaction send error', err);
-      }
     }
-  };
-
-  await handleCommand(commandName, args, ctx);
 });
 
-// ---------- Welcome message ----------
-client.on('guildMemberAdd', (member) => {
-  try {
-    const ch = member.guild.systemChannel;
-    if (ch) ch.send(`🎉 Welcome to the server, ${member}!`);
-  } catch (e) {
-    console.error('Welcome error', e);
-  }
+client.once('ready', () => {
+    console.log(`Logged in as ${client.user.tag}`);
 });
 
-// ---------- Ready & register slash commands ----------
-client.once('ready', async () => {
-  console.log(`Bot ready! Logged in as ${client.user.tag}`);
-  await registerSlashCommands().catch(err => console.error('Slash reg error', err));
-});
-
-// ---------- Error handling ----------
-client.on('error', err => console.error('Client error', err));
-process.on('unhandledRejection', err => console.error('Unhandled Rejection', err));
-process.on('uncaughtException', err => console.error('Uncaught Exception', err));
-
-// ---------- Login ----------
-console.log('Starting bot login...');
-client.login(DISCORD_TOKEN)
-  .then(() => console.log('Login successful'))
-  .catch(err => { console.error('Login failed', err); process.exit(1); });
+client.login(process.env.TOKEN);
