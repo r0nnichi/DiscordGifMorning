@@ -715,24 +715,25 @@ client.on('interactionCreate', async interaction => {
   const commandName = interaction.commandName;
   const opts = interaction.options?.data || [];
 
-  // build args: user options -> ids, string options -> strings, integer -> stringified number
+  // Build args: user options -> ids, string options -> strings, integer -> stringified number
   const args = opts.map(o => {
     if (o.type === 6) return String(o.value); // user id
     if (o.type === 4) return String(o.value); // integer
     return String(o.value);
   });
 
-  // build ctx for interaction
   let replied = false;
   const ctx = {
-    send: async content => {
+    send: async (content, ephemeral = false) => {
       try {
+        const payload = typeof content === 'string' ? { content } : content;
+        if (ephemeral) payload.flags = InteractionResponseFlags.Ephemeral;
+
         if (!replied) {
           replied = true;
-          // Since deferred, use editReply for first response
-          return await interaction.editReply(typeof content === 'string' ? { content } : content);
+          return await interaction.editReply(payload);
         } else {
-          return await interaction.followUp(typeof content === 'string' ? { content } : content);
+          return await interaction.followUp(payload);
         }
       } catch (err) {
         console.error('Interaction send error', err);
@@ -762,14 +763,14 @@ client.on('interactionCreate', async interaction => {
 // ---------- Ready ----------
 client.once('ready', async () => {
   console.log(`Bot ready! Logged in as ${client.user.tag}`);
-  await registerSlashCommands().catch(err => console.error('Slash reg error', err));
+  await registerSlashCommands().catch(err => console.error('Slash registration error:', err));
 });
 
 // ---------- Login ----------
 console.log('Starting bot login...');
-client.login(DISCORD_TOKEN).then(() => {
-  console.log('Login successful');
-}).catch(err => {
-  console.error('Login failed:', err);
-  process.exit(1);
-});
+client.login(DISCORD_TOKEN)
+  .then(() => console.log('Login successful'))
+  .catch(err => {
+    console.error('Login failed:', err);
+    process.exit(1);
+  });
