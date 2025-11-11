@@ -1,7 +1,7 @@
-// index.js — Full working version
+// index.js — Full working version (patched as requested)
 // Requirements:
 // npm install node-fetch discord.js dotenv express
-// .env must include DISCORD_TOKEN and optionally TENOR_API_KEY and PORT
+// .env must include DISCORD_TOKEN and optionally TENOR_API_KEY, OWNER_ID, and PORT
 
 // ---- Fetch shim for Node (works with node-fetch v3 dynamic import) ----
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
@@ -23,6 +23,7 @@ const {
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const TENOR_API_KEY = process.env.TENOR_API_KEY || '';
+const OWNER_ID = process.env.OWNER_ID || ''; // used for refill admin command
 const PORT = process.env.PORT || 3000;
 
 if (!DISCORD_TOKEN) {
@@ -146,10 +147,19 @@ async function registerSlashCommands() {
     { name: 'stealsticker', description: 'Steal sticker (URL or ID)', options: [{ name: 'sticker', type: 3, description: 'Sticker URL or ID', required: true }] },
     { name: 'help', description: 'Show commands' },
     { name: 'balance', description: 'Show your balance' },
-    { name: 'daily', description: 'Claim daily coins (100)' },
-    { name: 'gamble', description: 'Gamble coins', options: [{ name: 'amount', type: 4, description: 'Amount to gamble', required: true }] },
+    { name: 'daily', description: 'Claim daily clouds (100)' },
+    {
+      name: 'gamble',
+      description: 'Gamble clouds',
+      options: [
+        { name: 'amount', type: 4, description: 'Amount to gamble', required: true },
+        { name: 'type', type: 3, description: 'coin or card', required: false }
+      ]
+    },
     { name: 'shop', description: 'Show shop' },
     { name: 'buy', description: 'Buy a shop item', options: [{ name: 'item', type: 3, description: 'Item id', required: true }] },
+    { name: 'pay', description: 'Send clouds to a user', options: [{ name: 'user', type: 6, description: 'Recipient', required: true }, { name: 'amount', type: 4, description: 'Amount', required: true }] },
+    { name: 'refill', description: 'Owner: refill clouds for a user', options: [{ name: 'user', type: 6, description: 'Recipient', required: true }, { name: 'amount', type: 4, description: 'Amount', required: true }] },
   ];
 
   try {
@@ -178,7 +188,7 @@ async function handleCommand(context, command, args = []) {
           `**Auto replies:** "good morning" → GIF, "welcome" → GIF\n\n` +
           `**Fun:** ]joke, ]meme, ]cat, ]dog, ]8ball, ]coinflip, ]gif, ]fact, ]quote\n` +
           `**Interact:** ]hug @user, ]slap @user, ]highfive @user, ]touch @user\n` +
-          `**Economy:** ]balance, ]daily, ]gamble <amt>, ]shop, ]buy <item>\n\n` +
+          `**Economy:** ]balance, ]daily, ]gamble <amt> [coin|card], ]shop, ]buy <item>, ]pay <@user> <amt>\n\n` +
           `Slash versions exist for many commands too.`
         )
         .setColor('Blue');
@@ -266,14 +276,29 @@ async function handleCommand(context, command, args = []) {
       return send(`I pick: **${opts[Math.floor(Math.random() * opts.length)]}**`);
     }
 
-    // hug/slap/highfive/touch
+    // hug/slap/highfive/touch — FIXED mention resolution for prefix usage
     if (['hug', 'slap', 'highfive', 'touch'].includes(command)) {
-      // attempt to get mentioned user
       let user = null;
-      if (context.mentions && typeof context.mentions.first === 'function') user = context.mentions.first();
-      if (!user && args.length && context.guild) {
-        try { user = (await context.guild.members.fetch(args[0])).user; } catch (e) { /* ignore */ }
+
+      // 1) Prefer explicit mentions (users or members)
+      if (context.mentions) {
+        user =
+          (typeof context.mentions.users?.first === 'function' && context.mentions.users.first()) ||
+          (typeof context.mentions.members?.first === 'function' && context.mentions.members.first()?.user) ||
+          null;
       }
+
+      // 2) Fallback: parse args[0] for ID inside <@...> or raw ID
+      if (!user && args.length && args[0] && context.guild) {
+        const id = String(args[0]).replace(/[^0-9]/g, '');
+        if (id) {
+          try {
+            const member = await context.guild.members.fetch(id);
+            if (member) user = member.user;
+          } catch { /* ignore */ }
+        }
+      }
+
       if (!user) return send('Please mention a user!');
       const gif = await getTenorGif(command) || null;
       const embed = new EmbedBuilder().setTitle(`${context.author.username} ${command}s ${user.username}!`).setColor('Random');
@@ -295,7 +320,7 @@ async function handleCommand(context, command, args = []) {
     if (command === 'userinfo') {
       let user = null;
       if (args.length && context.guild) {
-        try { user = (await context.guild.members.fetch(args[0])).user; } catch (e) { /* ignore */ }
+        try { user = (await context.guild.members.fetch(args[0].replace(/[^0-9]/g, ''))).user; } catch (e) { /* ignore */ }
       }
       if (!user) user = context.author;
       const embed = new EmbedBuilder()
@@ -310,7 +335,7 @@ async function handleCommand(context, command, args = []) {
     if (command === 'avatar') {
       let user = null;
       if (args.length && context.guild) {
-        try { user = (await context.guild.members.fetch(args[0])).user; } catch (e) { /* ignore */ }
+        try { user = (await context.guild.members.fetch(args[0].replace(/[^0-9]/g, ''))).user; } catch (e) { /* ignore */ }
       }
       if (!user) user = context.author;
       return send({ content: `${user.tag}'s avatar:`, files: [user.displayAvatarURL({ dynamic: true, size: 1024 })] });
@@ -356,13 +381,13 @@ async function handleCommand(context, command, args = []) {
       }
     }
 
-    // ----- Economy -----
+    // ----- Economy (clouds ☁️) -----
     if (command === 'balance') {
       const bal = getBalance(context.author.id);
-      return send(`${context.author.username}, your balance: **${bal}** coins`);
+      return send(`${context.author.username}, your balance: **${bal}** clouds ☁️`);
     }
 
-    // daily — 100 coins, 24h cooldown
+    // daily — 100 clouds, 24h cooldown
     if (command === 'daily') {
       const uid = context.author.id;
       ensureAccount(uid);
@@ -374,32 +399,85 @@ async function handleCommand(context, command, args = []) {
         const hrs = Math.floor(leftMs / (60 * 60 * 1000));
         const mins = Math.floor((leftMs % (60 * 60 * 1000)) / (60 * 1000));
         return send(`You already claimed daily. Try again in ${hrs}h ${mins}m.`);
-      }
+        }
       const amount = 100;
       addMoney(uid, amount);
       setLastDaily(uid, now);
-      return send(`You claimed your daily **${amount}** coins! New balance: **${getBalance(uid)}**`);
+      return send(`You claimed your daily **${amount}** clouds ☁️! New balance: **${getBalance(uid)}**`);
     }
 
-    // gamble
+    // pay — send clouds to another user
+    if (command === 'pay') {
+      if (!args.length || args.length < 2) return send('Usage: ]pay <@user|userId> <amount>');
+      const targetRaw = args[0];
+      const amount = Number(args[1]);
+      if (!amount || amount <= 0) return send('Amount must be a positive number.');
+
+      const targetId = targetRaw.replace(/[^0-9]/g, '');
+      if (!targetId) return send('Please provide a valid user mention or ID.');
+      if (targetId === context.author.id) return send('You cannot pay yourself.');
+
+      if (getBalance(context.author.id) < amount) return send("You don't have that many clouds ☁️.");
+      ensureAccount(targetId);
+
+      removeMoney(context.author.id, amount);
+      addMoney(targetId, amount);
+      return send(`✅ Sent **${amount}** clouds ☁️ to <@${targetId}>. Your new balance: **${getBalance(context.author.id)}**`);
+    }
+
+    // refill — owner-only
+    if (command === 'refill') {
+      if (context.author.id !== OWNER_ID) return send('Only the owner can use this.');
+      if (!args.length || args.length < 2) return send('Usage: ]refill <@user|userId> <amount>');
+      const targetId = args[0].replace(/[^0-9]/g, '');
+      const amount = Number(args[1]);
+      if (!targetId || !amount || amount <= 0) return send('Provide a valid target and positive amount.');
+      addMoney(targetId, amount);
+      return send(`Owner refill: Added **${amount}** clouds ☁️ to <@${targetId}>. New balance: **${getBalance(targetId)}**`);
+    }
+
+    // gamble — coin (default) or card
     if (command === 'gamble') {
       const amount = Number(args[0]);
-      if (!amount || amount <= 0) return send('Usage: ]gamble <amount>');
+      const mode = (args[1] || 'coin').toLowerCase();
+      if (!amount || amount <= 0) return send('Usage: ]gamble <amount> [coin|card]');
       ensureAccount(context.author.id);
-      if (amount > getBalance(context.author.id)) return send("You don't have that many coins.");
-      const win = Math.random() < 0.5;
-      if (win) {
-        addMoney(context.author.id, amount);
-        return send(`You won and gained **${amount}** coins! New balance: **${getBalance(context.author.id)}**`);
+      if (amount > getBalance(context.author.id)) return send("You don't have that many clouds ☁️.");
+
+      if (mode === 'coin') {
+        const win = Math.random() < 0.5;
+        if (win) {
+          addMoney(context.author.id, amount);
+          return send(`You won! You gained **${amount}** clouds ☁️. New balance: **${getBalance(context.author.id)}**`);
+        } else {
+          removeMoney(context.author.id, amount);
+          return send(`You lost **${amount}** clouds ☁️. New balance: **${getBalance(context.author.id)}**`);
+        }
+      } else if (mode === 'card') {
+        const draw = () => Math.floor(Math.random() * 13) + 1; // 1..13
+        const you = draw();
+        const bot = draw();
+        if (you > bot) {
+          const payout = Math.floor(amount * 1.5); // +0.5x net
+          addMoney(context.author.id, payout);
+          return send(`🃏 Card flip — You: **${you}** vs Bot: **${bot}** → **You win!** Gained **${payout}** clouds ☁️. New balance: **${getBalance(context.author.id)}**`);
+        } else if (you < bot) {
+          removeMoney(context.author.id, amount);
+          return send(`🃏 Card flip — You: **${you}** vs Bot: **${bot}** → **You lose.** Lost **${amount}** clouds ☁️. New balance: **${getBalance(context.author.id)}**`);
+        } else {
+          return send(`🃏 Card flip — You: **${you}** vs Bot: **${bot}** → **Push (tie).** No clouds ☁️ lost or won.`);
+        }
       } else {
-        removeMoney(context.author.id, amount);
-        return send(`You lost **${amount}** coins. New balance: **${getBalance(context.author.id)}**`);
+        return send('Unknown gamble type. Use `coin` or `card`.');
       }
     }
 
     // shop
     if (command === 'shop') {
-      const embed = new EmbedBuilder().setTitle('Shop').setDescription(SHOP.map(it => `**${it.id}** — ${it.name} — ${it.price} coins\n${it.desc}`).join('\n\n')).setColor('Purple');
+      const embed = new EmbedBuilder()
+        .setTitle('Shop')
+        .setDescription(SHOP.map(it => `**${it.id}** — ${it.name} — ${it.price} clouds ☁️\n${it.desc}`).join('\n\n'))
+        .setColor('Purple');
       return send({ embeds: [embed] });
     }
 
@@ -409,10 +487,10 @@ async function handleCommand(context, command, args = []) {
       if (!itemId) return send('Usage: ]buy <item>');
       const item = SHOP.find(i => i.id === itemId);
       if (!item) return send('Item not found.');
-      if (getBalance(context.author.id) < item.price) return send(`Not enough coins — you need ${item.price}.`);
+      if (getBalance(context.author.id) < item.price) return send(`Not enough clouds ☁️ — you need ${item.price}.`);
       removeMoney(context.author.id, item.price);
       // NOTE: perks are demo only — you can implement role changes here
-      return send(`You bought **${item.name}** for **${item.price}** coins. New balance: **${getBalance(context.author.id)}**`);
+      return send(`You bought **${item.name}** for **${item.price}** clouds ☁️. New balance: **${getBalance(context.author.id)}**`);
     }
 
     // fallback
@@ -525,8 +603,6 @@ client.on('interactionCreate', async interaction => {
     };
 
     await handleCommand(context, commandName, args);
-    // If the command handler didn't send anything, ensure we editReply with a default
-    // but most commands send a reply. Omitting extra forced message to avoid "Unknown interaction" errors.
   } catch (err) {
     console.error('Slash command error:', err);
     try { if (interaction && interaction.deferred) await interaction.editReply({ content: 'Something went wrong 😢' }); } catch {}
